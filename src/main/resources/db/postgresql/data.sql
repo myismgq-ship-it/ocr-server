@@ -1,0 +1,76 @@
+INSERT INTO plan_segment_rule
+    (rule_type, rule_code, canonical_name, alias, group_order, alias_order, enabled)
+VALUES
+    ('COMMAND', 'command_system', '指挥体系', '指挥体系',       10, 10, TRUE),
+    ('COMMAND', 'command_system', '指挥体系', '组织指挥体系',   10, 20, TRUE),
+    ('COMMAND', 'command_system', '指挥体系', '应急指挥体系',   10, 30, TRUE),
+    ('COMMAND', 'command_system', '指挥体系', '指挥机构及职责', 10, 40, TRUE),
+    ('COMMAND', 'command_system', '指挥体系', '组织机构及职责', 10, 50, TRUE),
+
+    ('RESPONSE', 'level_1', '一级响应', '一级响应',       10, 10, TRUE),
+    ('RESPONSE', 'level_1', '一级响应', '一级应急响应',   10, 20, TRUE),
+    ('RESPONSE', 'level_1', '一级响应', 'Ⅰ级响应',        10, 30, TRUE),
+    ('RESPONSE', 'level_1', '一级响应', 'I级响应',         10, 40, TRUE),
+    ('RESPONSE', 'level_1', '一级响应', '特别重大响应',    10, 50, TRUE),
+
+    ('RESPONSE', 'level_2', '二级响应', '二级响应',       20, 10, TRUE),
+    ('RESPONSE', 'level_2', '二级响应', '二级应急响应',   20, 20, TRUE),
+    ('RESPONSE', 'level_2', '二级响应', 'Ⅱ级响应',        20, 30, TRUE),
+    ('RESPONSE', 'level_2', '二级响应', 'II级响应',        20, 40, TRUE),
+    ('RESPONSE', 'level_2', '二级响应', '重大响应',        20, 50, TRUE),
+
+    ('RESPONSE', 'level_3', '三级响应', '三级响应',       30, 10, TRUE),
+    ('RESPONSE', 'level_3', '三级响应', '三级应急响应',   30, 20, TRUE),
+    ('RESPONSE', 'level_3', '三级响应', 'Ⅲ级响应',        30, 30, TRUE),
+    ('RESPONSE', 'level_3', '三级响应', 'III级响应',       30, 40, TRUE),
+    ('RESPONSE', 'level_3', '三级响应', '较大响应',        30, 50, TRUE),
+
+    ('RESPONSE', 'level_4', '四级响应', '四级响应',       40, 10, TRUE),
+    ('RESPONSE', 'level_4', '四级响应', '四级应急响应',   40, 20, TRUE),
+    ('RESPONSE', 'level_4', '四级响应', 'Ⅳ级响应',        40, 30, TRUE),
+    ('RESPONSE', 'level_4', '四级响应', 'IV级响应',        40, 40, TRUE),
+    ('RESPONSE', 'level_4', '四级响应', '一般响应',        40, 50, TRUE),
+
+    ('WARNING', 'warning_level_1', '一级预警', '一级预警', 10, 10, TRUE),
+    ('WARNING', 'warning_level_1', '一级预警', 'Ⅰ级预警', 10, 20, TRUE),
+    ('WARNING', 'warning_level_1', '一级预警', '红色预警', 10, 30, TRUE),
+    ('WARNING', 'warning_level_2', '二级预警', '二级预警', 20, 10, TRUE),
+    ('WARNING', 'warning_level_2', '二级预警', 'Ⅱ级预警', 20, 20, TRUE),
+    ('WARNING', 'warning_level_2', '二级预警', '橙色预警', 20, 30, TRUE),
+    ('WARNING', 'warning_level_3', '三级预警', '三级预警', 30, 10, TRUE),
+    ('WARNING', 'warning_level_3', '三级预警', 'Ⅲ级预警', 30, 20, TRUE),
+    ('WARNING', 'warning_level_3', '三级预警', '黄色预警', 30, 30, TRUE),
+    ('WARNING', 'warning_level_4', '四级预警', '四级预警', 40, 10, TRUE),
+    ('WARNING', 'warning_level_4', '四级预警', 'Ⅳ级预警', 40, 20, TRUE),
+    ('WARNING', 'warning_level_4', '四级预警', '蓝色预警', 40, 30, TRUE),
+
+    ('SECTION', 'warning_scope', '预警章节', '监测预警', 10, 10, TRUE),
+    ('SECTION', 'warning_scope', '预警章节', '预警响应', 10, 20, TRUE),
+    ('SECTION', 'emergency_scope', '应急响应章节', '应急响应', 20, 10, TRUE),
+    ('SECTION', 'emergency_scope', '应急响应章节', '分级响应', 20, 20, TRUE),
+    ('SECTION', 'action_group_scope', '行动组章节', '工作组', 30, 10, TRUE),
+    ('SECTION', 'action_group_scope', '行动组章节', '现场指挥部工作组', 30, 20, TRUE),
+
+    ('MARKER', 'activation_condition', '启动条件标记', '启动条件', 10, 10, TRUE),
+    ('MARKER', 'activation_condition', '启动条件标记', '响应条件', 10, 20, TRUE),
+    ('MARKER', 'activation_condition', '启动条件标记', '发布条件', 10, 30, TRUE),
+    ('MARKER', 'response_measure', '响应措施标记', '响应措施', 20, 10, TRUE),
+    ('MARKER', 'response_measure', '响应措施标记', '应急措施', 20, 20, TRUE),
+    ('MARKER', 'response_measure', '响应措施标记', '处置措施', 20, 30, TRUE),
+    ('MARKER', 'inheritance', '措施继承标记', '基础上', 30, 10, TRUE),
+    ('MARKER', 'group_lead', '牵头单位标记', '牵头', 40, 10, TRUE),
+    ('MARKER', 'group_member', '成员单位标记', '组成', 50, 10, TRUE),
+    ('MARKER', 'group_responsibility', '职责标记', '主要负责', 60, 10, TRUE),
+
+    ('TAIL', 'response_tail', '响应结束标题', '启动条件调整', 10, 10, TRUE),
+    ('TAIL', 'response_tail', '响应结束标题', '响应终止',     10, 20, TRUE),
+    ('TAIL', 'response_tail', '响应结束标题', '综合保障',     10, 30, TRUE),
+    ('TAIL', 'response_tail', '响应结束标题', '后期处置',     10, 40, TRUE),
+    ('TAIL', 'response_tail', '响应结束标题', '附则',         10, 50, TRUE),
+    ('TAIL', 'response_tail', '响应结束标题', '附件',         10, 60, TRUE)
+ON CONFLICT (rule_type, rule_code, alias) DO UPDATE
+SET canonical_name = EXCLUDED.canonical_name,
+    group_order = EXCLUDED.group_order,
+    alias_order = EXCLUDED.alias_order,
+    enabled = EXCLUDED.enabled,
+    updated_at = CURRENT_TIMESTAMP;

@@ -1,0 +1,876 @@
+package com.gsafety.ocrtool.segment;
+
+import com.gsafety.ocrtool.document.DocumentBlock;
+import com.gsafety.ocrtool.document.ParsedDocument;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
+
+@Service
+public class PlanSegmentService {
+
+    private static final Pattern ACTION_GROUP_PATTERN = Pattern.compile(
+            "(?:[（(]?\\d+[）)]\\s*)?([\\p{IsHan}A-Za-z0-9]{2,24}(?:工作组|保障组|指挥组|协调组|处置组|救援组|专家组|行动组|组))(?=[:：。\\s]|$)");
+    private static final Pattern INLINE_GROUPS_PATTERN = Pattern.compile("下设(.{2,120}?)等(?:专项)?工作组");
+
+    private final SegmentRuleProvider ruleProvider;
+
+    public PlanSegmentService(SegmentRuleProvider ruleProvider) {
+        this.ruleProvider = ruleProvider;
+    }
+
+    public SegmentResult extract(ParsedDocument document) {
+        SegmentRules rules = ruleProvider.currentRules();
+        List<String> warnings = new ArrayList<>();
+        SegmentSection commandSystem = findBestSection(
+                rules.commandKey(), null, rules.commandAliases(), document.blocks(), warnings, rules)
+                .orElse(null);
+
+        List<SegmentSection> responseLevels = new ArrayList<>();
+        for (Map.Entry<String, List<String>> entry : rules.responseAliases().entrySet()) {
+            Optional<SegmentSection> section = findBestSection(
+                    rules.responseKeys().get(entry.getKey()),
+                    entry.getKey(),
+                    entry.getValue(),
+                    document.blocks(),
+                    warnings,
+                    rules);
+            if (section.isPresent()) {
+                responseLevels.add(section.get());
+            } else {
+                warnings.add("未识别到" + entry.getKey() + "内容。");
+            }
+        }
+        List<ResponseLevelSegment> warningResponses = extractLevels(
+                "WARNING", levelDefinitions(true, rules), document.blocks(), rules, warnings);
+        List<ResponseLevelSegment> emergencyResponses = extractLevels(
+                "EMERGENCY", levelDefinitions(false, rules), document.blocks(), rules, warnings);
+        List<ActionGroupSegment> actionGroups = extractActionGroups(document.blocks());
+        return new SegmentResult(
+                commandSystem,
+                responseLevels,
+                warningResponses,
+                emergencyResponses,
+                actionGroups,
+                warnings);
+    }
+
+    private List<LevelDefinition> levelDefinitions(boolean warning, SegmentRules rules) {
+        List<LevelDefinition> definitions = new ArrayList<>();
+        String[] levels = warning
+                ? new String[] {"一级预警", "二级预警", "三级预警", "四级预警"}
+                : new String[] {"一级响应", "二级响应", "三级响应", "四级响应"};
+        String[] keys = warning
+                ? new String[] {"warning_level_1", "warning_level_2", "warning_level_3", "warning_level_4"}
+                : new String[] {"level_1", "level_2", "level_3", "level_4"};
+        String[] colorKeys = {"red", "orange", "yellow", "blue"};
+        String[] colorNames = {"红色", "橙色", "黄色", "蓝色"};
+        List<List<String>> defaults = warning ? defaultWarningAliases() : defaultResponseAliases();
+        Map<String, List<String>> configuredAliases = warning ? rules.warningAliases() : rules.responseAliases();
+        Map<String, String> configuredKeys = warning ? rules.warningKeys() : rules.responseKeys();
+        for (int i = 0; i < 4; i++) {
+            List<String> aliases = new ArrayList<>(defaults.get(i));
+            for (Map.Entry<String, String> entry : configuredKeys.entrySet()) {
+                if (keys[i].equals(entry.getValue())) {
+                    aliases.addAll(configuredAliases.getOrDefault(entry.getKey(), List.of()));
+                }
+            }
+            definitions.add(new LevelDefinition(
+                    keys[i], levels[i], warning ? colorKeys[i] : null, warning ? colorNames[i] : null,
+                    List.copyOf(new LinkedHashSet<>(aliases))));
+        }
+        return definitions;
+    }
+
+    private List<List<String>> defaultWarningAliases() {
+        return List.of(
+                List.of("一级预警", "Ⅰ级预警", "I级预警", "红色预警", "红色"),
+                List.of("二级预警", "Ⅱ级预警", "II级预警", "橙色预警", "橙色"),
+                List.of("三级预警", "Ⅲ级预警", "III级预警", "黄色预警", "黄色"),
+                List.of("四级预警", "Ⅳ级预警", "IV级预警", "蓝色预警", "蓝色"));
+    }
+
+    private List<List<String>> defaultResponseAliases() {
+        return List.of(
+                List.of("一级响应", "一级应急响应", "Ⅰ级响应", "I级响应", "特别重大响应"),
+                List.of("二级响应", "二级应急响应", "Ⅱ级响应", "II级响应", "重大响应"),
+                List.of("三级响应", "三级应急响应", "Ⅲ级响应", "III级响应", "较大响应"),
+                List.of("四级响应", "四级应急响应", "Ⅳ级响应", "IV级响应", "一般响应"));
+    }
+
+    private List<ResponseLevelSegment> extractLevels(
+            String category,
+            List<LevelDefinition> definitions,
+            List<DocumentBlock> blocks,
+            SegmentRules rules,
+            List<String> warnings) {
+        Map<String, MutableLevel> levels = new LinkedHashMap<>();
+        definitions.forEach(definition -> levels.put(definition.key(), new MutableLevel(definition)));
+        for (int i = 0; i < blocks.size(); i++) {
+            DocumentBlock block = blocks.get(i);
+            if (isTocBlock(block)) {
+                continue;
+            }
+            for (LevelDefinition definition : definitions) {
+                if (matchingAlias(block.text(), definition.aliases()) == null) {
+                    continue;
+                }
+                if (!isPrimaryLevelMention(block, definition, definitions)) {
+                    continue;
+                }
+                int end = findLevelWindowEnd(i, blocks, definitions, rules);
+                CandidateParts parts = classifyLevelWindow(category, i, end, blocks, rules);
+                levels.get(definition.key()).add(block, parts);
+            }
+        }
+        if ("WARNING".equals(category)) {
+            applyWarningInheritance(levels, definitions);
+        }
+        List<ResponseLevelSegment> result = new ArrayList<>();
+        for (MutableLevel level : levels.values()) {
+            ResponseLevelSegment segment = level.toSegment();
+            result.add(segment);
+            if ("MISSING".equals(segment.status()) && "WARNING".equals(category)) {
+                warnings.add("未识别到" + segment.level() + "内容。");
+            } else if ("PARTIAL".equals(segment.status())) {
+                warnings.add(segment.level() + "仅识别到启动条件或响应措施中的一项，请人工核对。");
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    private boolean isPrimaryLevelMention(
+            DocumentBlock block, LevelDefinition current, List<LevelDefinition> definitions) {
+        if (block.heading() || block.table() || block.text().length() <= 30) {
+            return true;
+        }
+        if (containsGroupedLevelMention(block.text(), current, definitions)) {
+            return true;
+        }
+        String text = normalize(block.text());
+        int currentIndex = lastAliasIndex(text, current.aliases());
+        int latestIndex = definitions.stream()
+                .mapToInt(definition -> lastAliasIndex(text, definition.aliases()))
+                .max()
+                .orElse(-1);
+        return currentIndex == latestIndex;
+    }
+
+    private boolean containsGroupedLevelMention(
+            String text, LevelDefinition current, List<LevelDefinition> definitions) {
+        for (String currentAlias : current.aliases()) {
+            for (LevelDefinition other : definitions) {
+                if (other.key().equals(current.key())) {
+                    continue;
+                }
+                for (String otherAlias : other.aliases()) {
+                    String left = Pattern.quote(currentAlias) + ".{0,4}[、及和与/]" + ".{0,4}" + Pattern.quote(otherAlias);
+                    String right = Pattern.quote(otherAlias) + ".{0,4}[、及和与/]" + ".{0,4}" + Pattern.quote(currentAlias);
+                    if (Pattern.compile(left + "|" + right).matcher(text).find()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private int lastAliasIndex(String normalizedText, List<String> aliases) {
+        return aliases.stream()
+                .map(this::normalize)
+                .mapToInt(normalizedText::lastIndexOf)
+                .max()
+                .orElse(-1);
+    }
+
+    private int findLevelWindowEnd(
+            int start, List<DocumentBlock> blocks, List<LevelDefinition> definitions, SegmentRules rules) {
+        int anchorLevel = blocks.get(start).headingLevel();
+        int limit = Math.min(blocks.size(), start + 60);
+        for (int i = start + 1; i < limit; i++) {
+            DocumentBlock block = blocks.get(i);
+            boolean levelHeading = matchesAnyLevel(block.text(), definitions)
+                    && (block.heading() || block.table() || block.text().length() <= 18 || startsWithNumber(block.text()));
+            if (isResponseBoundary(block.text(), rules) || levelHeading) {
+                return i;
+            }
+            if (anchorLevel > 0 && block.headingLevel() > 0 && block.headingLevel() <= anchorLevel && i > start + 1) {
+                return i;
+            }
+        }
+        return limit;
+    }
+
+    private boolean matchesAnyLevel(String text, List<LevelDefinition> definitions) {
+        return definitions.stream().anyMatch(definition -> matchingAlias(text, definition.aliases()) != null);
+    }
+
+    private CandidateParts classifyLevelWindow(
+            String category, int start, int end, List<DocumentBlock> blocks, SegmentRules rules) {
+        List<DocumentBlock> conditions = new ArrayList<>();
+        List<DocumentBlock> measures = new ArrayList<>();
+        ContentKind kind = contextKind(category, start, blocks, rules);
+        for (int i = start; i < end; i++) {
+            DocumentBlock block = blocks.get(i);
+            String text = block.text().trim();
+            if (i == start && (block.heading()
+                    || text.length() <= 30 && !text.matches(".*[。；;].*"))) {
+                continue;
+            }
+            if (containsMarker(text, rules, "activation_condition", List.of("启动条件", "响应条件", "发布条件"))) {
+                kind = ContentKind.CONDITION;
+                if (isStandaloneMarker(text)) {
+                    continue;
+                }
+            }
+            if (containsMarker(text, rules, "response_measure", List.of("响应措施", "应急措施", "处置措施", "协调措施"))) {
+                kind = ContentKind.MEASURE;
+                if (isStandaloneMarker(text)) {
+                    continue;
+                }
+            }
+            if (kind == ContentKind.UNKNOWN) {
+                kind = looksLikeCondition(text) ? ContentKind.CONDITION : ContentKind.MEASURE;
+            }
+            (kind == ContentKind.CONDITION ? conditions : measures).add(block);
+        }
+        return new CandidateParts(joinText(conditions), joinText(measures), pages(conditions), pages(measures));
+    }
+
+    private ContentKind contextKind(String category, int start, List<DocumentBlock> blocks, SegmentRules rules) {
+        StringBuilder context = new StringBuilder();
+        for (int i = Math.max(0, start - 12); i <= start; i++) {
+            context.append(blocks.get(i).text()).append('\n');
+        }
+        String value = context.toString();
+        if (containsMarker(value, rules, "activation_condition", List.of("启动条件", "响应条件", "发布条件", "响应分级", "预警分级"))) {
+            return ContentKind.CONDITION;
+        }
+        if (containsMarker(value, rules, "response_measure", List.of("响应措施", "应急措施", "处置措施", "响应行动", "协调措施"))) {
+            return ContentKind.MEASURE;
+        }
+        String anchor = blocks.get(start).text();
+        if ("WARNING".equals(category) && anchor.contains("预警") && !anchor.contains("响应")) {
+            return ContentKind.CONDITION;
+        }
+        if (anchor.matches(".*(启动|实施).{0,12}(响应|预警响应).*")) {
+            return ContentKind.MEASURE;
+        }
+        return ContentKind.UNKNOWN;
+    }
+
+    private boolean containsMarker(String text, SegmentRules rules, String code, List<String> defaults) {
+        List<String> markers = rules.markerAliases().getOrDefault(code, defaults);
+        return markers.stream().anyMatch(text::contains);
+    }
+
+    private boolean isStandaloneMarker(String text) {
+        return normalize(text).matches("(启动|响应|发布)?条件|响应措施|应急措施|处置措施|协调措施");
+    }
+
+    private boolean looksLikeCondition(String text) {
+        return text.matches(".*(发生|预计|达到|符合|出现|超过|低于|造成|可能发生).*")
+                && !text.matches(".*(组织|开展|调度|派出|加强|负责|协调).*");
+    }
+
+    private void applyWarningInheritance(Map<String, MutableLevel> levels, List<LevelDefinition> definitions) {
+        for (MutableLevel target : levels.values()) {
+            String direct = target.directMeasures();
+            if (!StringUtils.hasText(direct)) {
+                continue;
+            }
+            for (LevelDefinition source : definitions) {
+                if (source.key().equals(target.definition().key())) {
+                    continue;
+                }
+                boolean referenced = source.aliases().stream()
+                        .anyMatch(alias -> direct.matches("(?s).*" + Pattern.quote(alias) + ".{0,20}基础上.*"));
+                if (referenced) {
+                    target.addInherited(source.key());
+                }
+            }
+        }
+        for (MutableLevel level : levels.values()) {
+            expandMeasures(level, levels, new LinkedHashSet<>());
+        }
+    }
+
+    private String expandMeasures(MutableLevel level, Map<String, MutableLevel> levels, Set<String> visiting) {
+        if (level.effectiveMeasures() != null) {
+            return level.effectiveMeasures();
+        }
+        if (!visiting.add(level.definition().key())) {
+            return level.directMeasures();
+        }
+        List<String> paragraphs = new ArrayList<>();
+        for (String sourceKey : level.inheritedFrom()) {
+            MutableLevel source = levels.get(sourceKey);
+            if (source != null) {
+                addParagraphs(paragraphs, expandMeasures(source, levels, visiting));
+            }
+        }
+        addParagraphs(paragraphs, level.directMeasures());
+        visiting.remove(level.definition().key());
+        String effective = paragraphs.isEmpty() ? null : String.join("\n", paragraphs);
+        level.setEffectiveMeasures(effective);
+        return effective;
+    }
+
+    private void addParagraphs(List<String> target, String content) {
+        if (!StringUtils.hasText(content)) {
+            return;
+        }
+        content.lines().map(String::trim).filter(StringUtils::hasText).forEach(line -> {
+            if (!target.contains(line)) {
+                target.add(line);
+            }
+        });
+    }
+
+    private List<ActionGroupSegment> extractActionGroups(List<DocumentBlock> blocks) {
+        Map<String, MutableActionGroup> groups = new LinkedHashMap<>();
+        for (int i = 0; i < blocks.size(); i++) {
+            DocumentBlock block = blocks.get(i);
+            if (isTocBlock(block)) {
+                continue;
+            }
+            String text = block.text().trim();
+            Matcher matcher = ACTION_GROUP_PATTERN.matcher(text);
+            while (matcher.find()) {
+                String name = cleanGroupName(matcher.group(1));
+                if (!isUsefulGroupName(name)) {
+                    continue;
+                }
+                String detail = text;
+                if (text.length() <= name.length() + 8 && i + 1 < blocks.size()) {
+                    detail = text + "\n" + blocks.get(i + 1).text();
+                }
+                mergeActionGroup(groups, name, detail, block.page());
+            }
+            Matcher inline = INLINE_GROUPS_PATTERN.matcher(text);
+            if (inline.find()) {
+                for (String item : inline.group(1).split("[、，,及和]") ) {
+                    String baseName = cleanGroupName(item);
+                    String name = baseName.endsWith("组") ? baseName : baseName + "组";
+                    if (isUsefulGroupName(name)) {
+                        mergeActionGroup(groups, name, text, block.page());
+                    }
+                }
+            }
+        }
+        return groups.values().stream().map(MutableActionGroup::toSegment).toList();
+    }
+
+    private void mergeActionGroup(Map<String, MutableActionGroup> groups, String name, String detail, int page) {
+        String normalizedName = normalizeGroupName(name);
+        MutableActionGroup group = groups.computeIfAbsent(
+                normalizedName, ignored -> new MutableActionGroup(actionGroupKey(normalizedName), name));
+        group.add(detail, page);
+    }
+
+    private String cleanGroupName(String name) {
+        return name.replaceFirst("^[（(]?\\d+[）)]", "").trim();
+    }
+
+    private boolean isUsefulGroupName(String name) {
+        return StringUtils.hasText(name)
+                && name.length() >= 3
+                && !Set.of("各工作组", "工作组", "领导小组", "指挥部工作组").contains(name);
+    }
+
+    private String normalizeGroupName(String name) {
+        return name.replaceAll("[\\s:：。；;（）()、，,]", "");
+    }
+
+    private String actionGroupKey(String normalizedName) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(normalizedName.getBytes(StandardCharsets.UTF_8));
+            StringBuilder value = new StringBuilder("action_group_");
+            for (int i = 0; i < 8; i++) {
+                value.append(String.format(Locale.ROOT, "%02x", digest[i]));
+            }
+            return value.toString();
+        } catch (NoSuchAlgorithmException ex) {
+            throw new IllegalStateException("JDK 不支持 SHA-256。", ex);
+        }
+    }
+
+    private Optional<SegmentSection> findBestSection(
+            String key,
+            String level,
+            List<String> aliases,
+            List<DocumentBlock> blocks,
+            List<String> warnings,
+            SegmentRules rules) {
+        List<Candidate> candidates = new ArrayList<>();
+        for (int i = 0; i < blocks.size(); i++) {
+            DocumentBlock block = blocks.get(i);
+            String alias = matchingAlias(block.text(), aliases);
+            if (alias == null) {
+                continue;
+            }
+            if (isTocBlock(block)) {
+                candidates.add(new Candidate(i, alias, matchType(block, alias, aliases, rules), true));
+                continue;
+            }
+            candidates.add(new Candidate(i, alias, matchType(block, alias, aliases, rules), false));
+        }
+
+        List<Candidate> bodyCandidates = candidates.stream()
+                .filter(candidate -> !candidate.toc())
+                .sorted(Comparator.comparingInt(candidate -> score(candidate, blocks.get(candidate.index()))))
+                .toList();
+        long structuralCandidateCount = bodyCandidates.stream()
+                .filter(candidate -> candidate.matchedBy() != MatchedBy.CONTEXT_FALLBACK)
+                .count();
+        if (structuralCandidateCount > 1) {
+            warnings.add((level == null ? "指挥体系" : level) + "存在多个候选章节，已选择正文中优先级最高的候选。");
+        }
+        if (!bodyCandidates.isEmpty()) {
+            return Optional.of(toSection(key, level, bodyCandidates.get(0), blocks, rules));
+        }
+        if (!candidates.isEmpty()) {
+            warnings.add((level == null ? "指挥体系" : level) + "仅在疑似目录中命中，未提取正文内容。");
+        } else {
+            Optional<SegmentSection> fallback = contextFallback(key, level, aliases, blocks);
+            fallback.ifPresent(section -> warnings.add((level == null ? "指挥体系" : level)
+                    + "未发现明确标题，已按上下文提取。"));
+            return fallback;
+        }
+        return Optional.empty();
+    }
+
+    private SegmentSection toSection(
+            String key, String level, Candidate candidate, List<DocumentBlock> blocks, SegmentRules rules) {
+        DocumentBlock anchor = blocks.get(candidate.index());
+        if (anchor.table()) {
+            return tableSection(key, level, candidate, blocks, rules);
+        }
+
+        int end = findSectionEnd(candidate.index(), blocks, level != null, rules);
+        List<DocumentBlock> contentBlocks = blocks.subList(candidate.index() + 1, end);
+        String content = joinText(contentBlocks);
+        if (!StringUtils.hasText(content)) {
+            content = anchor.text();
+            contentBlocks = List.of(anchor);
+        }
+        return new SegmentSection(
+                key,
+                level,
+                anchor.text(),
+                content,
+                pages(contentBlocks),
+                candidate.matchedBy(),
+                List.of(anchor.text()));
+    }
+
+    private SegmentSection tableSection(
+            String key, String level, Candidate candidate, List<DocumentBlock> blocks, SegmentRules rules) {
+        DocumentBlock anchor = blocks.get(candidate.index());
+        List<DocumentBlock> rows = new ArrayList<>();
+        rows.add(anchor);
+        for (int i = candidate.index() + 1; i < Math.min(candidate.index() + 3, blocks.size()); i++) {
+            DocumentBlock next = blocks.get(i);
+            if (!next.table() || containsAnyResponseAlias(next.text(), rules)) {
+                break;
+            }
+            rows.add(next);
+        }
+        return new SegmentSection(
+                key,
+                level,
+                anchor.text(),
+                joinText(rows),
+                pages(rows),
+                MatchedBy.TABLE_ROW,
+                List.of(anchor.text()));
+    }
+
+    private Optional<SegmentSection> contextFallback(
+            String key, String level, List<String> aliases, List<DocumentBlock> blocks) {
+        for (int i = 0; i < blocks.size(); i++) {
+            DocumentBlock block = blocks.get(i);
+            String alias = matchingAlias(block.text(), aliases);
+            if (alias == null || isTocBlock(block) || block.text().length() < 30) {
+                continue;
+            }
+            int end = Math.min(blocks.size(), i + 4);
+            List<DocumentBlock> contentBlocks = blocks.subList(i, end);
+            return Optional.of(new SegmentSection(
+                    key,
+                    level,
+                    alias,
+                    joinText(contentBlocks),
+                    pages(contentBlocks),
+                    MatchedBy.CONTEXT_FALLBACK,
+                    List.of(block.text())));
+        }
+        return Optional.empty();
+    }
+
+    private int findSectionEnd(
+            int start, List<DocumentBlock> blocks, boolean responseSection, SegmentRules rules) {
+        DocumentBlock anchor = blocks.get(start);
+        int currentLevel = anchor.headingLevel() > 0
+                ? anchor.headingLevel()
+                : inferHeadingLevel(anchor.text(), rules);
+        if (currentLevel <= 0) {
+            currentLevel = 2;
+        }
+        for (int i = start + 1; i < blocks.size(); i++) {
+            DocumentBlock block = blocks.get(i);
+            if (responseSection && isResponseBoundary(block.text(), rules)) {
+                return i;
+            }
+            int level = block.headingLevel() > 0
+                    ? block.headingLevel()
+                    : inferHeadingLevel(block.text(), rules);
+            if (level > 0 && level <= currentLevel) {
+                return i;
+            }
+        }
+        return blocks.size();
+    }
+
+    private MatchedBy matchType(
+            DocumentBlock block, String alias, List<String> aliases, SegmentRules rules) {
+        if (block.table()) {
+            return MatchedBy.TABLE_ROW;
+        }
+        boolean heading = block.heading() || inferHeadingLevel(block.text(), rules) > 0;
+        if (!heading) {
+            return MatchedBy.CONTEXT_FALLBACK;
+        }
+        if (normalize(block.text()).contains(normalize(aliases.get(0)))) {
+            return MatchedBy.HEADING;
+        }
+        if (startsWithNumber(block.text())) {
+            return MatchedBy.NUMBERED_SECTION;
+        }
+        return MatchedBy.HEADING_ALIAS;
+    }
+
+    private int score(Candidate candidate, DocumentBlock block) {
+        int score = 0;
+        if (candidate.matchedBy() == MatchedBy.HEADING || candidate.matchedBy() == MatchedBy.HEADING_ALIAS) {
+            score += 1;
+        } else if (candidate.matchedBy() == MatchedBy.TABLE_ROW) {
+            score += 2;
+        } else if (candidate.matchedBy() == MatchedBy.NUMBERED_SECTION) {
+            score += 3;
+        } else {
+            score += 10;
+        }
+        score += Math.min(block.text().length() / 20, 5);
+        return score;
+    }
+
+    private String matchingAlias(String text, List<String> aliases) {
+        String normalizedText = normalize(text);
+        for (String alias : aliases) {
+            String normalizedAlias = normalize(alias);
+            if ("重大响应".equals(alias) && normalizedText.contains(normalize("特别重大响应"))) {
+                continue;
+            }
+            if (containsAlias(normalizedText, normalizedAlias)) {
+                return alias;
+            }
+        }
+        return null;
+    }
+
+    private boolean containsAlias(String normalizedText, String normalizedAlias) {
+        if (normalizedAlias.matches("I{1,3}级响应|IV级响应")) {
+            return Pattern.compile("(^|[^I])" + Pattern.quote(normalizedAlias) + "($|[^I])")
+                    .matcher(normalizedText)
+                    .find();
+        }
+        return normalizedText.contains(normalizedAlias);
+    }
+
+    private boolean containsAnyResponseAlias(String text, SegmentRules rules) {
+        return rules.responseAliases().values().stream()
+                .flatMap(List::stream)
+                .anyMatch(alias -> containsAlias(normalize(text), normalize(alias)));
+    }
+
+    private boolean isResponseBoundary(String text, SegmentRules rules) {
+        if (!StringUtils.hasText(text)) {
+            return false;
+        }
+        if (isStandaloneResponseHeading(text, rules)) {
+            return true;
+        }
+        String normalized = normalize(text);
+        return rules.responseTailHeadings().stream()
+                .map(this::normalize)
+                .anyMatch(normalized::contains);
+    }
+
+    private boolean isStandaloneResponseHeading(String text, SegmentRules rules) {
+        String normalized = normalize(text);
+        if (normalized.length() > 16) {
+            return false;
+        }
+        return rules.responseAliases().values().stream()
+                .flatMap(List::stream)
+                .map(this::normalize)
+                .anyMatch(normalized::equals);
+    }
+
+    private boolean isTocBlock(DocumentBlock block) {
+        String text = normalize(block.text());
+        return text.equals("目录")
+                || text.contains("目录")
+                || Pattern.compile("\\.{3,}\\d*$").matcher(block.text()).find()
+                || Pattern.compile(".+\\s+\\d{1,3}$").matcher(block.text()).find() && block.page() <= 3;
+    }
+
+    private boolean startsWithNumber(String text) {
+        return text.matches("^(第[一二三四五六七八九十]+[章节篇]|[一二三四五六七八九十]+[、.]|\\d+(?:\\.\\d+){0,3}[、.\\s]).*");
+    }
+
+    private int inferHeadingLevel(String text, SegmentRules rules) {
+        if (!StringUtils.hasText(text) || text.length() > 80) {
+            return 0;
+        }
+        if (isStandaloneResponseHeading(text, rules)) {
+            return 3;
+        }
+        if (rules.responseTailHeadings().stream().map(this::normalize).anyMatch(normalize(text)::contains)) {
+            return 2;
+        }
+        if (text.matches("^第[一二三四五六七八九十]+[章节篇].*")) {
+            return 1;
+        }
+        if (text.matches("^[一二三四五六七八九十]+[、.].*")) {
+            return 2;
+        }
+        if (text.matches("^\\d+(?:\\.\\d+){0,3}[、.\\s].*")) {
+            return text.contains(".") ? 3 : 2;
+        }
+        return 0;
+    }
+
+    private String joinText(List<DocumentBlock> blocks) {
+        return blocks.stream()
+                .map(DocumentBlock::text)
+                .filter(StringUtils::hasText)
+                .distinct()
+                .reduce((left, right) -> left + "\n" + right)
+                .orElse("");
+    }
+
+    private List<Integer> pages(List<DocumentBlock> blocks) {
+        Set<Integer> pages = new LinkedHashSet<>();
+        for (DocumentBlock block : blocks) {
+            if (block.page() > 0) {
+                pages.add(block.page());
+            }
+        }
+        return new ArrayList<>(pages);
+    }
+
+    private String normalize(String text) {
+        if (text == null) {
+            return "";
+        }
+        return text.replaceAll("[\\s　:：；;（）()\\[\\]【】]", "")
+                .replace("Ｉ", "I")
+                .replace("Ⅱ", "II")
+                .replace("Ⅲ", "III")
+                .replace("Ⅳ", "IV")
+                .toUpperCase(java.util.Locale.ROOT);
+    }
+
+    private record LevelDefinition(
+            String key, String level, String colorKey, String colorName, List<String> aliases) {
+    }
+
+    private record CandidateParts(
+            String conditions,
+            String measures,
+            List<Integer> conditionPages,
+            List<Integer> measurePages) {
+    }
+
+    private enum ContentKind {
+        UNKNOWN,
+        CONDITION,
+        MEASURE
+    }
+
+    private final class MutableLevel {
+
+        private final LevelDefinition definition;
+        private final List<String> conditions = new ArrayList<>();
+        private final List<String> measures = new ArrayList<>();
+        private final Set<Integer> conditionPages = new LinkedHashSet<>();
+        private final Set<Integer> measurePages = new LinkedHashSet<>();
+        private final List<String> evidence = new ArrayList<>();
+        private final List<String> inheritedFrom = new ArrayList<>();
+        private MatchedBy matchedBy = MatchedBy.CONTEXT_FALLBACK;
+        private String title;
+        private String effectiveMeasures;
+
+        private MutableLevel(LevelDefinition definition) {
+            this.definition = definition;
+        }
+
+        private void add(DocumentBlock anchor, CandidateParts parts) {
+            if (title == null) {
+                title = anchor.text();
+            }
+            if (evidence.size() < 5 && !evidence.contains(anchor.text())) {
+                evidence.add(anchor.text());
+            }
+            if (anchor.table()) {
+                matchedBy = MatchedBy.TABLE_ROW;
+            } else if (anchor.heading()) {
+                matchedBy = MatchedBy.HEADING_ALIAS;
+            }
+            addParagraphs(conditions, parts.conditions());
+            addParagraphs(measures, parts.measures());
+            conditionPages.addAll(parts.conditionPages());
+            measurePages.addAll(parts.measurePages());
+        }
+
+        private LevelDefinition definition() {
+            return definition;
+        }
+
+        private String directMeasures() {
+            return measures.isEmpty() ? null : String.join("\n", measures);
+        }
+
+        private String effectiveMeasures() {
+            return effectiveMeasures;
+        }
+
+        private void setEffectiveMeasures(String effectiveMeasures) {
+            this.effectiveMeasures = effectiveMeasures;
+        }
+
+        private List<String> inheritedFrom() {
+            return inheritedFrom;
+        }
+
+        private void addInherited(String key) {
+            if (!inheritedFrom.contains(key)) {
+                inheritedFrom.add(key);
+            }
+        }
+
+        private ResponseLevelSegment toSegment() {
+            String activationConditions = conditions.isEmpty() ? null : String.join("\n", conditions);
+            String direct = directMeasures();
+            String effective = effectiveMeasures != null ? effectiveMeasures : direct;
+            String status;
+            if (!StringUtils.hasText(activationConditions) && !StringUtils.hasText(effective)) {
+                status = "MISSING";
+            } else if (!StringUtils.hasText(activationConditions) || !StringUtils.hasText(effective)) {
+                status = "PARTIAL";
+            } else {
+                status = "EXTRACTED";
+            }
+            return new ResponseLevelSegment(
+                    definition.key(),
+                    definition.key().startsWith("warning_") ? "WARNING" : "EMERGENCY",
+                    definition.level(),
+                    title == null ? definition.level() : title,
+                    definition.colorKey(),
+                    definition.colorName(),
+                    status,
+                    activationConditions,
+                    direct,
+                    effective,
+                    List.copyOf(inheritedFrom),
+                    List.copyOf(conditionPages),
+                    List.copyOf(measurePages),
+                    matchedBy,
+                    List.copyOf(evidence));
+        }
+    }
+
+    private final class MutableActionGroup {
+
+        private static final Pattern LEAD_PATTERN = Pattern.compile("由(.{1,100}?)(?:牵头|负责)");
+        private static final Pattern MEMBER_PATTERN = Pattern.compile(
+                "(?:联合|会同|成员包括|牵头[，,])(.{1,160}?)(?:组成|参加|为成员)");
+
+        private final String key;
+        private final String name;
+        private final List<String> leads = new ArrayList<>();
+        private final List<String> members = new ArrayList<>();
+        private final List<String> responsibilities = new ArrayList<>();
+        private final List<String> raw = new ArrayList<>();
+        private final Set<Integer> pages = new LinkedHashSet<>();
+
+        private MutableActionGroup(String key, String name) {
+            this.key = key;
+            this.name = name;
+        }
+
+        private void add(String detail, int page) {
+            addParagraphs(raw, detail);
+            if (page > 0) {
+                pages.add(page);
+            }
+            Matcher lead = LEAD_PATTERN.matcher(detail);
+            while (lead.find()) {
+                addOrganizations(leads, lead.group(1));
+            }
+            Matcher member = MEMBER_PATTERN.matcher(detail);
+            while (member.find()) {
+                addOrganizations(members, member.group(1));
+            }
+            int mainResponsibility = detail.lastIndexOf("主要负责");
+            int responsibilityIndex = mainResponsibility >= 0 ? mainResponsibility : detail.lastIndexOf("负责");
+            if (responsibilityIndex >= 0) {
+                String value = detail.substring(responsibilityIndex).trim();
+                if (!responsibilities.contains(value)) {
+                    responsibilities.add(value);
+                }
+            }
+        }
+
+        private void addOrganizations(List<String> target, String text) {
+            for (String item : text.split("[、，,及和]") ) {
+                String value = item.replaceAll("^(由|联合|会同)", "").trim();
+                if (StringUtils.hasText(value) && value.length() <= 60 && !target.contains(value)) {
+                    target.add(value);
+                }
+            }
+        }
+
+        private ActionGroupSegment toSegment() {
+            return new ActionGroupSegment(
+                    key,
+                    name,
+                    List.copyOf(leads),
+                    List.copyOf(members),
+                    responsibilities.isEmpty() ? null : String.join("\n", responsibilities),
+                    raw.isEmpty() ? null : String.join("\n", raw),
+                    List.copyOf(pages),
+                    MatchedBy.CONTEXT_FALLBACK,
+                    raw.stream().limit(5).toList());
+        }
+    }
+
+    private record Candidate(int index, String alias, MatchedBy matchedBy, boolean toc) {
+    }
+}

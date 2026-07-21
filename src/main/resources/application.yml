@@ -1,0 +1,103 @@
+server:
+  port: ${SERVER_PORT:38084}
+
+spring:
+  application:
+    name: ocr-tool-service
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://10.3.10.172:25432/em?currentSchema=ocr}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+  sql:
+    init:
+      mode: ${SPRING_SQL_INIT_MODE:never}
+      schema-locations: classpath:db/postgresql/schema.sql
+      data-locations: classpath:db/postgresql/data.sql
+  servlet:
+    multipart:
+      max-file-size: ${OCR_MAX_FILE_SIZE:10MB}
+      max-request-size: ${OCR_MAX_REQUEST_SIZE:10MB}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+ocr:
+  image:
+    max-size: ${OCR_IMAGE_MAX_SIZE:10485760}
+  preprocess:
+    enabled: ${OCR_PREPROCESS_ENABLED:true}
+    min-readable-side: ${OCR_PREPROCESS_MIN_READABLE_SIDE:1200}
+    max-deskew-angle: ${OCR_PREPROCESS_MAX_DESKEW_ANGLE:12}
+    multi-pass: ${OCR_PREPROCESS_MULTI_PASS:true}
+  rapid:
+    enabled: ${OCR_RAPID_ENABLED:true}
+    model: ${OCR_RAPID_MODEL:ONNX_PPOCR_V4}
+  templates:
+    safety_license:
+      fields:
+        enterpriseName:
+          labels: [企业名称, 单位名称, 公司名称]
+          stop-labels: [许可范围, 经营范围, 主要负责人, 负责人, 单位地址, 经济类型, 有效期]
+          direction: right
+          merge-wrapped-lines: true
+        creditCode:
+          labels: [统一社会信用代码]
+          stop-labels: [安全生产许可证, 企业名称]
+          direction: right
+          max-lines: 1
+        licenseNumber:
+          labels: [编号, 许可证编号, 证书编号]
+          stop-labels: [企业名称, 许可范围, 经营范围, 主要负责人, 负责人, 单位地址, 经济类型, 有效期]
+          direction: right
+          max-lines: 1
+        principal:
+          labels: [主要负责人, 法定代表人, 负责人]
+          stop-labels: [单位地址, 经济类型, 有效期]
+          direction: right
+          max-lines: 1
+        address:
+          labels: [单位地址, 住所, 地址]
+          stop-labels: [经济类型, 有效期, 许可范围, 经营范围]
+          direction: right
+          merge-wrapped-lines: true
+        economicType:
+          labels: [经济类型, 类型]
+          stop-labels: [有效期, 许可范围, 经营范围]
+          direction: right
+          max-lines: 1
+        validPeriod:
+          labels: [有效期]
+          stop-labels: [发证机关, 发证日期, MEM, 许可范围, 经营范围]
+          direction: right
+          max-lines: 2
+        scope:
+          labels: [许可范围, 经营范围]
+          stop-labels: [主要负责人, 单位地址, 经济类型, 有效期, 发证机关, 发证日期]
+          direction: right
+          merge-wrapped-lines: true
+        issueDate:
+          labels: [发证日期, 签发日期]
+          stop-labels: [MEM]
+          direction: right
+          max-lines: 1
+
+plan:
+  document:
+    max-size: ${PLAN_DOCUMENT_MAX_SIZE:50MB}
+  pdf:
+    max-pages: ${PLAN_PDF_MAX_PAGES:50}
+    ocr-dpi: ${PLAN_PDF_OCR_DPI:200}
+    text-min-chars: ${PLAN_PDF_TEXT_MIN_CHARS:80}
+  segment-rules:
+    cache-ttl: ${PLAN_SEGMENT_RULES_CACHE_TTL:1m}
+  task:
+    storage-directory: ${PLAN_TASK_STORAGE_DIRECTORY:${java.io.tmpdir}/ocr-plan-tasks}
+    parallelism: ${PLAN_TASK_PARALLELISM:2}
+    scan-interval: ${PLAN_TASK_SCAN_INTERVAL:1s}
+    heartbeat-interval: ${PLAN_TASK_HEARTBEAT_INTERVAL:30s}
+    lease: ${PLAN_TASK_LEASE:5m}
+    failed-file-retention: ${PLAN_TASK_FAILED_FILE_RETENTION:7d}
