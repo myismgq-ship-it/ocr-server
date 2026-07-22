@@ -1,4 +1,4 @@
-# OCR Tool Service
+# OCR Server
 
 独立 OCR HTTP 工具服务，基于 RapidOCR 提供图片文字识别和模板字段抽取能力。
 

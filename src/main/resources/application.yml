@@ -3,7 +3,7 @@ server:
 
 spring:
   application:
-    name: ocr-tool-service
+    name: ocr-server
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://10.3.10.172:25432/em?currentSchema=ocr}
     username: ${SPRING_DATASOURCE_USERNAME:postgres}
