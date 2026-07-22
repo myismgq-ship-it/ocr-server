@@ -12,10 +12,10 @@
     </parent>
 
     <groupId>com.gsafety</groupId>
-    <artifactId>ocr-tool-service</artifactId>
+    <artifactId>ocr-server</artifactId>
     <version>0.0.1-SNAPSHOT</version>
-    <name>ocr-tool-service</name>
-    <description>Reusable OCR HTTP service</description>
+    <name>ocr-server</name>
+    <description>Reusable OCR HTTP server</description>
 
     <properties>
         <java.version>17</java.version>

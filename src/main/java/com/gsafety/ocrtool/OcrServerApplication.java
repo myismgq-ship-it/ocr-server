@@ -8,10 +8,9 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @SpringBootApplication
 @ConfigurationPropertiesScan
 @EnableScheduling
-public class OcrToolApplication {
+public class OcrServerApplication {
 
     public static void main(String[] args) {
-        SpringApplication.run(OcrToolApplication.class, args);
+        SpringApplication.run(OcrServerApplication.class, args);
     }
 }
-

@@ -36,7 +36,7 @@ public class PlanDigitizeTaskDispatcher {
         this.executor = planDigitizeExecutor;
         this.properties = properties;
         this.permits = new Semaphore(Math.max(1, properties.getTask().getParallelism()));
-        String host = System.getenv().getOrDefault("COMPUTERNAME", "ocr-tool-service");
+        String host = System.getenv().getOrDefault("COMPUTERNAME", "ocr-server");
         this.workerId = host + "-" + UUID.randomUUID();
     }
 
