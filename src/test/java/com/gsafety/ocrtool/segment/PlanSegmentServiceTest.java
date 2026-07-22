@@ -144,12 +144,111 @@ class PlanSegmentServiceTest {
         assertThat(result.warningResponses().get(3).directResponseMeasures()).contains("通知有关单位");
     }
 
+    @Test
+    void extractsActivationConditionsFromSidewaysResponseTableColumns() {
+        ParsedDocument document = new ParsedDocument("plan.pdf", DocumentFileType.PDF, DocumentParseMode.OCR, List.of(
+                table("四级响应"),
+                table("符合以下情形之一时，"),
+                table("启动四级响应："),
+                table("1. 四级条件内容。"),
+                table("三级响应"),
+                table("符合以下情形之一时，"),
+                table("启动三级响应："),
+                table("1. 三级条件内容。"),
+                table("二级响应"),
+                table("符合以下情形之一时，"),
+                table("启动二级响应："),
+                table("1. 二级条件内容。"),
+                table("一级响应"),
+                table("符合以下情形之一时，"),
+                table("启动一级响应："),
+                table("1. 一级条件内容。"),
+                table("4. 二级应急响应不能控"),
+                table("制；")
+        ), List.of());
+
+        SegmentResult result = service.extract(document);
+
+        assertThat(result.emergencyResponses()).extracting(ResponseLevelSegment::activationConditions)
+                .containsExactly(
+                        "符合以下情形之一时，\n启动一级响应：\n1. 一级条件内容。\n4. 二级应急响应不能控\n制；",
+                        "符合以下情形之一时，\n启动二级响应：\n1. 二级条件内容。",
+                        "符合以下情形之一时，\n启动三级响应：\n1. 三级条件内容。",
+                        "符合以下情形之一时，\n启动四级响应：\n1. 四级条件内容。");
+        assertThat(result.emergencyResponses()).extracting(ResponseLevelSegment::directResponseMeasures)
+                .containsOnlyNulls();
+    }
+
+    @Test
+    void separatesNumberedResponseMeasuresFromAppendixConditions() {
+        ParsedDocument document = new ParsedDocument("fire-plan.pdf", DocumentFileType.PDF, DocumentParseMode.OCR, List.of(
+                block("5.3 市级响应", 9, 2),
+                block("火灾事故发生后，依据响应条件，启动相应等级响应。", 9, 0),
+                block("5.3.1 四级响应", 9, 3),
+                block("符合四级响应条件时，市指挥部办公室主任启动四级响应。", 9, 0),
+                block("市指挥部办公室密切关注火场态势，做好应急出动准备。", 9, 0),
+                block("5.3.2 三级响应", 9, 3),
+                block("符合三级响应条件时，由指挥长宣布启动三级响应。重点做好以下工作：", 9, 0),
+                block("(1)通知有关成员单位和救援力量立即赶赴现场。", 9, 0),
+                block("5.3.3 一、二级响应", 10, 3),
+                block("符合一、二级响应条件时，建议启动一级或二级响应。", 10, 0),
+                block("在做好三级响应重点工作的基础上，落实上级工作组指导意见。", 10, 0),
+                block("5.3.5 响应结束", 11, 3),
+                block("一级、二级、三级响应由现场指挥长宣布响应结束，四级响应由办公室决定结束。", 11, 0),
+                block("附件1 市级火灾事故应急响应流程图", 13, 1),
+                block("四级响应", 13, 0),
+                block("采取响应措施", 13, 0),
+                tableAt(18, "四级响应"),
+                tableAt(18, "符合以下情形之一时，"),
+                tableAt(18, "启动四级响应："),
+                tableAt(18, "1. 四级条件。"),
+                tableAt(18, "三级响应"),
+                tableAt(18, "符合以下情形之一时，"),
+                tableAt(18, "启动三级响应："),
+                tableAt(18, "1. 三级条件。"),
+                tableAt(18, "二级响应"),
+                tableAt(18, "符合以下情形之一时，"),
+                tableAt(18, "启动二级响应："),
+                tableAt(18, "1. 二级条件。"),
+                tableAt(18, "一级响应"),
+                tableAt(18, "符合以下情形之一时，"),
+                tableAt(18, "启动一级响应："),
+                tableAt(18, "1. 一级条件。"),
+                block("抄送：市委办公室。", 19, 0)
+        ), List.of());
+
+        SegmentResult result = service.extract(document);
+
+        ResponseLevelSegment level1 = result.emergencyResponses().get(0);
+        ResponseLevelSegment level2 = result.emergencyResponses().get(1);
+        ResponseLevelSegment level3 = result.emergencyResponses().get(2);
+        ResponseLevelSegment level4 = result.emergencyResponses().get(3);
+        assertThat(level1.activationConditions()).contains("一级条件").doesNotContain("抄送", "指导意见");
+        assertThat(level2.activationConditions()).contains("二级条件").doesNotContain("指导意见");
+        assertThat(level3.activationConditions()).contains("三级条件").doesNotContain("赶赴现场");
+        assertThat(level4.activationConditions()).contains("四级条件").doesNotContain("密切关注");
+        assertThat(level1.directResponseMeasures()).contains("建议启动一级或二级响应", "指导意见");
+        assertThat(level2.directResponseMeasures()).contains("建议启动一级或二级响应", "指导意见");
+        assertThat(level3.directResponseMeasures()).contains("赶赴现场");
+        assertThat(level4.directResponseMeasures()).contains("密切关注");
+        assertThat(result.emergencyResponses()).allSatisfy(level -> {
+            assertThat(level.status()).isEqualTo("EXTRACTED");
+            assertThat(level.activationConditions()).doesNotContain("流程图", "响应结束");
+            assertThat(level.directResponseMeasures()).doesNotContain("流程图", "响应结束");
+            assertThat(level.conditionSourcePages()).containsExactly(18);
+        });
+    }
+
     private DocumentBlock block(String text, int page, int headingLevel) {
         return new DocumentBlock(text, page, headingLevel, false, List.of());
     }
 
     private DocumentBlock table(String... cells) {
         return new DocumentBlock(String.join(" ", cells), 1, 0, true, List.of(cells));
+    }
+
+    private DocumentBlock tableAt(int page, String... cells) {
+        return new DocumentBlock(String.join(" ", cells), page, 0, true, List.of(cells));
     }
 
     private SegmentSection find(SegmentResult result, String level) {

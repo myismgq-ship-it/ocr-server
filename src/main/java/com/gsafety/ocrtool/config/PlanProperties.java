@@ -68,6 +68,8 @@ public class PlanProperties {
 
         private int textMinChars = 80;
 
+        private boolean sidewaysTableOcrEnabled = true;
+
         public int getMaxPages() {
             return maxPages;
         }
@@ -90,6 +92,14 @@ public class PlanProperties {
 
         public void setTextMinChars(int textMinChars) {
             this.textMinChars = textMinChars;
+        }
+
+        public boolean isSidewaysTableOcrEnabled() {
+            return sidewaysTableOcrEnabled;
+        }
+
+        public void setSidewaysTableOcrEnabled(boolean sidewaysTableOcrEnabled) {
+            this.sidewaysTableOcrEnabled = sidewaysTableOcrEnabled;
         }
     }
 

@@ -121,11 +121,14 @@ public class PlanSegmentService {
         definitions.forEach(definition -> levels.put(definition.key(), new MutableLevel(definition)));
         for (int i = 0; i < blocks.size(); i++) {
             DocumentBlock block = blocks.get(i);
-            if (isTocBlock(block)) {
+            if (isTocBlock(block) || isFlowchartContext(i, blocks)) {
+                continue;
+            }
+            if (isConditionLevelContinuation(i, blocks)) {
                 continue;
             }
             for (LevelDefinition definition : definitions) {
-                if (matchingAlias(block.text(), definition.aliases()) == null) {
+                if (!matchesLevelDefinition(block.text(), definition)) {
                     continue;
                 }
                 if (!isPrimaryLevelMention(block, definition, definitions)) {
@@ -154,23 +157,24 @@ public class PlanSegmentService {
 
     private boolean isPrimaryLevelMention(
             DocumentBlock block, LevelDefinition current, List<LevelDefinition> definitions) {
-        if (block.heading() || block.table() || block.text().length() <= 30) {
+        if (looksLikeCondition(block.text()) || isResponseLifecycleReference(block.text())) {
+            return false;
+        }
+        if (block.heading() || block.table()) {
             return true;
         }
         if (containsGroupedLevelMention(block.text(), current, definitions)) {
             return true;
         }
-        String text = normalize(block.text());
-        int currentIndex = lastAliasIndex(text, current.aliases());
-        int latestIndex = definitions.stream()
-                .mapToInt(definition -> lastAliasIndex(text, definition.aliases()))
-                .max()
-                .orElse(-1);
-        return currentIndex == latestIndex;
+        String text = stripSectionNumber(normalize(block.text()));
+        return current.aliases().stream().map(this::normalize).anyMatch(text::equals);
     }
 
     private boolean containsGroupedLevelMention(
             String text, LevelDefinition current, List<LevelDefinition> definitions) {
+        if (matchesCompressedLevelMention(text, current)) {
+            return true;
+        }
         for (String currentAlias : current.aliases()) {
             for (LevelDefinition other : definitions) {
                 if (other.key().equals(current.key())) {
@@ -188,12 +192,24 @@ public class PlanSegmentService {
         return false;
     }
 
-    private int lastAliasIndex(String normalizedText, List<String> aliases) {
-        return aliases.stream()
-                .map(this::normalize)
-                .mapToInt(normalizedText::lastIndexOf)
-                .max()
-                .orElse(-1);
+    private boolean matchesLevelDefinition(String text, LevelDefinition definition) {
+        return matchingAlias(text, definition.aliases()) != null
+                || matchesCompressedLevelMention(text, definition);
+    }
+
+    private boolean matchesCompressedLevelMention(String text, LevelDefinition definition) {
+        if (!definition.level().endsWith("响应")) {
+            return false;
+        }
+        String numeral = definition.level().substring(0, 1);
+        Matcher matcher = Pattern.compile("([一二三四](?:[、,，/和及与][一二三四])+)(?:级)?(?:应急)?响应")
+                .matcher(normalize(text));
+        while (matcher.find()) {
+            if (matcher.group(1).contains(numeral)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private int findLevelWindowEnd(
@@ -202,7 +218,12 @@ public class PlanSegmentService {
         int limit = Math.min(blocks.size(), start + 60);
         for (int i = start + 1; i < limit; i++) {
             DocumentBlock block = blocks.get(i);
+            if (blocks.get(start).table() && !block.table()) {
+                return i;
+            }
             boolean levelHeading = matchesAnyLevel(block.text(), definitions)
+                    && !looksLikeCondition(block.text())
+                    && !isConditionLevelContinuation(i, blocks)
                     && (block.heading() || block.table() || block.text().length() <= 18 || startsWithNumber(block.text()));
             if (isResponseBoundary(block.text(), rules) || levelHeading) {
                 return i;
@@ -212,6 +233,14 @@ public class PlanSegmentService {
             }
         }
         return limit;
+    }
+
+    private boolean isConditionLevelContinuation(int index, List<DocumentBlock> blocks) {
+        if (index <= 0 || !looksLikeCondition(blocks.get(index - 1).text())) {
+            return false;
+        }
+        String text = normalize(blocks.get(index).text());
+        return text.contains("响应") && (text.contains("启动") || text.startsWith("动"));
     }
 
     private boolean matchesAnyLevel(String text, List<LevelDefinition> definitions) {
@@ -230,13 +259,15 @@ public class PlanSegmentService {
                     || text.length() <= 30 && !text.matches(".*[。；;].*"))) {
                 continue;
             }
-            if (containsMarker(text, rules, "activation_condition", List.of("启动条件", "响应条件", "发布条件"))) {
+            if (isStructuralMarker(
+                    block, text, rules, "activation_condition", List.of("启动条件", "响应条件", "发布条件"))) {
                 kind = ContentKind.CONDITION;
                 if (isStandaloneMarker(text)) {
                     continue;
                 }
             }
-            if (containsMarker(text, rules, "response_measure", List.of("响应措施", "应急措施", "处置措施", "协调措施"))) {
+            if (isStructuralMarker(
+                    block, text, rules, "response_measure", List.of("响应措施", "应急措施", "处置措施", "协调措施"))) {
                 kind = ContentKind.MEASURE;
                 if (isStandaloneMarker(text)) {
                     continue;
@@ -251,20 +282,33 @@ public class PlanSegmentService {
     }
 
     private ContentKind contextKind(String category, int start, List<DocumentBlock> blocks, SegmentRules rules) {
-        StringBuilder context = new StringBuilder();
-        for (int i = Math.max(0, start - 12); i <= start; i++) {
-            context.append(blocks.get(i).text()).append('\n');
+        for (int i = start; i >= Math.max(0, start - 12); i--) {
+            DocumentBlock block = blocks.get(i);
+            boolean condition = isStructuralMarker(
+                    block,
+                    block.text(),
+                    rules,
+                    "activation_condition",
+                    List.of("启动条件", "响应条件", "发布条件", "响应分级", "预警分级"));
+            boolean measure = isStructuralMarker(
+                    block,
+                    block.text(),
+                    rules,
+                    "response_measure",
+                    List.of("响应措施", "应急措施", "处置措施", "响应行动", "协调措施"));
+            if (condition != measure) {
+                return condition ? ContentKind.CONDITION : ContentKind.MEASURE;
+            }
         }
-        String value = context.toString();
-        if (containsMarker(value, rules, "activation_condition", List.of("启动条件", "响应条件", "发布条件", "响应分级", "预警分级"))) {
-            return ContentKind.CONDITION;
-        }
-        if (containsMarker(value, rules, "response_measure", List.of("响应措施", "应急措施", "处置措施", "响应行动", "协调措施"))) {
-            return ContentKind.MEASURE;
-        }
-        String anchor = blocks.get(start).text();
+        DocumentBlock anchorBlock = blocks.get(start);
+        String anchor = anchorBlock.text();
         if ("WARNING".equals(category) && anchor.contains("预警") && !anchor.contains("响应")) {
             return ContentKind.CONDITION;
+        }
+        if (!anchorBlock.table()
+                && anchorBlock.heading()
+                && normalize(anchor).matches("^\\d+(?:\\.\\d+){1,4}.*响应.*")) {
+            return ContentKind.MEASURE;
         }
         if (anchor.matches(".*(启动|实施).{0,12}(响应|预警响应).*")) {
             return ContentKind.MEASURE;
@@ -272,9 +316,26 @@ public class PlanSegmentService {
         return ContentKind.UNKNOWN;
     }
 
-    private boolean containsMarker(String text, SegmentRules rules, String code, List<String> defaults) {
+    private boolean isStructuralMarker(
+            DocumentBlock block,
+            String text,
+            SegmentRules rules,
+            String code,
+            List<String> defaults) {
         List<String> markers = rules.markerAliases().getOrDefault(code, defaults);
-        return markers.stream().anyMatch(text::contains);
+        if (markers.stream().noneMatch(text::contains)) {
+            return false;
+        }
+        if (isStandaloneMarker(text) || block.heading()) {
+            return true;
+        }
+        String value = stripSectionNumber(normalize(text));
+        return markers.stream().map(this::normalize).anyMatch(value::startsWith);
+    }
+
+    private String stripSectionNumber(String text) {
+        return text.replaceFirst("^\\d+(?:\\.\\d+){0,4}[、.]?", "")
+                .replaceFirst("^[一二三四五六七八九十]+[、.]", "");
     }
 
     private boolean isStandaloneMarker(String text) {
@@ -282,8 +343,31 @@ public class PlanSegmentService {
     }
 
     private boolean looksLikeCondition(String text) {
-        return text.matches(".*(发生|预计|达到|符合|出现|超过|低于|造成|可能发生).*")
+        return text.matches(".*(发生|预计|达到|符合|出现|超过|低于|造成|可能发生|不能控|无法控).*")
                 && !text.matches(".*(组织|开展|调度|派出|加强|负责|协调).*");
+    }
+
+    private boolean isResponseLifecycleReference(String text) {
+        String value = normalize(text);
+        return value.contains("响应结束")
+                || value.contains("响应终止")
+                || value.contains("响应调整")
+                || value.contains("响应解除")
+                || value.startsWith("结束")
+                || value.startsWith("终止");
+    }
+
+    private boolean isFlowchartContext(int index, List<DocumentBlock> blocks) {
+        DocumentBlock current = blocks.get(index);
+        if (current.table()) {
+            return false;
+        }
+        for (int i = index; i >= 0 && blocks.get(i).page() == current.page(); i--) {
+            if (normalize(blocks.get(i).text()).contains("流程图")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void applyWarningInheritance(Map<String, MutableLevel> levels, List<LevelDefinition> definitions) {

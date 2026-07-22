@@ -97,6 +97,7 @@ plan:
     max-pages: 50
     ocr-dpi: 200
     text-min-chars: 80
+    sideways-table-ocr-enabled: true
   segment-rules:
     cache-ttl: 1m
   task:

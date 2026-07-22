@@ -92,6 +92,7 @@ plan:
     max-pages: ${PLAN_PDF_MAX_PAGES:50}
     ocr-dpi: ${PLAN_PDF_OCR_DPI:200}
     text-min-chars: ${PLAN_PDF_TEXT_MIN_CHARS:80}
+    sideways-table-ocr-enabled: ${PLAN_PDF_SIDEWAYS_TABLE_OCR_ENABLED:true}
   segment-rules:
     cache-ttl: ${PLAN_SEGMENT_RULES_CACHE_TTL:1m}
   task:
