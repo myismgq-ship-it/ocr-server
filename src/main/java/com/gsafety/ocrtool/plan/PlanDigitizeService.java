@@ -1,5 +1,8 @@
 package com.gsafety.ocrtool.plan;
 
+import com.gsafety.ocrtool.common.ProcessingMetrics;
+import com.gsafety.ocrtool.common.ProcessingProgressListener;
+import com.gsafety.ocrtool.common.ProcessingStage;
 import com.gsafety.ocrtool.document.DocumentDownloadService;
 import com.gsafety.ocrtool.document.DocumentParseService;
 import com.gsafety.ocrtool.document.DocumentUploadService;
@@ -14,6 +17,7 @@ import com.gsafety.ocrtool.segment.PlanSegmentService;
 import com.gsafety.ocrtool.segment.ResponseLevelSegment;
 import com.gsafety.ocrtool.segment.SegmentResult;
 import com.gsafety.ocrtool.segment.SegmentSection;
+import com.gsafety.ocrtool.segment.SegmentRules;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Pattern;
@@ -23,14 +27,23 @@ import org.springframework.web.multipart.MultipartFile;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * 预案数字化的主编排服务。
+ *
+ * <p>统一远程下载/上传、文档解析、规则快照分段、响应映射、进度和耗时指标。</p>
+ */
 @Service
 public class PlanDigitizeService {
 
     private static final Logger log = LoggerFactory.getLogger(PlanDigitizeService.class);
 
+    /** 受 SSRF 防护约束的远程文档入口。 */
     private final DocumentDownloadService downloadService;
+    /** multipart 文档校验和临时文件入口。 */
     private final DocumentUploadService uploadService;
+    /** 根据真实文件类型选择 Word/PDF 解析器。 */
     private final DocumentParseService parseService;
+    /** 使用单次不可变规则快照提取业务章节。 */
     private final PlanSegmentService segmentService;
 
     public PlanDigitizeService(
@@ -44,26 +57,84 @@ public class PlanDigitizeService {
         this.segmentService = segmentService;
     }
 
+    /** 按远程 URL 同步解析预案。 */
     public PlanDigitizeResponse digitize(String documentUrl) {
+        return digitize(documentUrl, ProcessingProgressListener.NOOP);
+    }
+
+    /**
+     * 按远程 URL 解析预案，并向异步任务上报阶段进度。
+     */
+    public PlanDigitizeResponse digitize(
+            String documentUrl, ProcessingProgressListener progressListener) {
+        ProcessingProgressListener listener = listener(progressListener);
+        listener.onProgress(ProcessingStage.DOWNLOAD, 5);
         try (DownloadedDocument document = downloadService.download(documentUrl)) {
-            return digitizeDocument(document);
+            return digitizeDocument(document, listener);
         }
     }
 
+    /** 按上传文件同步解析预案。 */
     public PlanDigitizeResponse digitize(MultipartFile file) {
+        return digitize(file, ProcessingProgressListener.NOOP);
+    }
+
+    /**
+     * 按上传文件解析预案，并向异步任务上报阶段进度。
+     */
+    public PlanDigitizeResponse digitize(
+            MultipartFile file, ProcessingProgressListener progressListener) {
         try (DownloadedDocument document = uploadService.upload(file)) {
-            return digitizeDocument(document);
+            return digitizeDocument(document, listener(progressListener));
         }
     }
 
+    /**
+     * 使用指定规则快照解析上传样本，供未发布规则的隔离测试使用。
+     *
+     * <p>该入口不会发布规则，也不会刷新线上规则缓存。</p>
+     */
+    public PlanDigitizeResponse digitize(MultipartFile file, SegmentRules rules) {
+        try (DownloadedDocument document = uploadService.upload(file)) {
+            return digitizeDocument(document, ProcessingProgressListener.NOOP, rules);
+        }
+    }
+
+    /** 解析已准备好的文档，供异步上传任务复用。 */
     public PlanDigitizeResponse digitizeDocument(DownloadedDocument document) {
+        return digitizeDocument(document, ProcessingProgressListener.NOOP);
+    }
+
+    /**
+     * 解析已准备好的文档，并持久化任务阶段进度。
+     */
+    public PlanDigitizeResponse digitizeDocument(
+            DownloadedDocument document, ProcessingProgressListener progressListener) {
+        return digitizeDocument(document, progressListener, null);
+    }
+
+    private PlanDigitizeResponse digitizeDocument(
+            DownloadedDocument document,
+            ProcessingProgressListener progressListener,
+            SegmentRules rules) {
+        ProcessingProgressListener listener = listener(progressListener);
         long totalStarted = System.nanoTime();
+        listener.onProgress(ProcessingStage.PARSE, 15);
+        // 文档解析阶段可能内部切换到 OCR，解析器通过同一监听器细化进度。
         long parseStarted = System.nanoTime();
-        ParsedDocument parsedDocument = parseService.parse(document);
+        ParsedDocument parsedDocument = listener == ProcessingProgressListener.NOOP
+                ? parseService.parse(document)
+                : parseService.parse(document, listener);
         long parseMillis = elapsedMillis(parseStarted);
+        ProcessingMetrics.record("parse", parseStarted);
+        listener.onProgress(ProcessingStage.SEGMENT, 75);
+        // 未显式传入规则时仅在这里读取一次 provider 快照，保证整份文档规则一致。
         long segmentStarted = System.nanoTime();
-        SegmentResult segmentResult = segmentService.extract(parsedDocument);
+        SegmentResult segmentResult = rules == null
+                ? segmentService.extract(parsedDocument)
+                : segmentService.extract(parsedDocument, rules);
         long segmentMillis = elapsedMillis(segmentStarted);
+        ProcessingMetrics.record("segment", segmentStarted);
         List<String> warnings = new ArrayList<>();
         warnings.addAll(parsedDocument.warnings());
         warnings.addAll(segmentResult.warnings());
@@ -87,12 +158,20 @@ public class PlanDigitizeService {
                 warningResponses,
                 emergencyResponses,
                 segmentResult.actionGroups().stream().map(this::toActionGroup).toList(),
-                List.copyOf(warnings));
+                List.copyOf(warnings),
+                segmentResult.ruleVersion());
+        listener.onProgress(ProcessingStage.PERSIST, 95);
         log.info(
+        // PERSIST 表示结构化结果已经准备完毕，真正数据库提交由任务 Worker 完成。
                 "预案数字化完成，fileName={}, parseMode={}, parseMs={}, segmentMs={}, totalMs={}",
                 parsedDocument.fileName(), parsedDocument.parseMode(), parseMillis, segmentMillis,
                 elapsedMillis(totalStarted));
+        ProcessingMetrics.record("total", totalStarted);
         return response;
+    }
+
+    private ProcessingProgressListener listener(ProcessingProgressListener progressListener) {
+        return progressListener == null ? ProcessingProgressListener.NOOP : progressListener;
     }
 
     private PlanSectionResponse toPlanSection(SegmentSection section) {

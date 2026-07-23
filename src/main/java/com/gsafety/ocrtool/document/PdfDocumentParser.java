@@ -1,8 +1,13 @@
 package com.gsafety.ocrtool.document;
 
 import com.gsafety.ocrtool.common.OcrException;
+import com.gsafety.ocrtool.common.ProcessingMetrics;
+import com.gsafety.ocrtool.common.ProcessingProgressListener;
+import com.gsafety.ocrtool.common.ProcessingStage;
 import com.gsafety.ocrtool.config.PlanProperties;
 import com.gsafety.ocrtool.engine.OcrEngine;
+import com.gsafety.ocrtool.preprocess.ImagePreprocessor;
+import com.gsafety.ocrtool.preprocess.PreprocessedImage;
 import com.gsafety.ocrtool.recognition.OcrLine;
 import com.gsafety.ocrtool.recognition.OcrPoint;
 import com.gsafety.ocrtool.recognition.OcrResult;
@@ -30,6 +35,12 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
+/**
+ * 按页解析 PDF 的混合型文档解析器。
+ *
+ * <p>每页先尝试提取文本；有效文本不足时只对该页渲染并执行 OCR，
+ * 从而避免将整份混合 PDF 错误地全部归为文本或扫描件。</p>
+ */
 @Component
 public class PdfDocumentParser implements DocumentParser {
 
@@ -37,12 +48,17 @@ public class PdfDocumentParser implements DocumentParser {
     private static final List<String> RESPONSE_LEVEL_NAMES =
             List.of("一级响应", "二级响应", "三级响应", "四级响应");
 
+    /** PDF 页数、渲染 DPI 和有效文本阈值。 */
     private final PlanProperties properties;
+    /** 实际执行页面文字识别的 OCR 引擎，可能包含降级策略。 */
     private final OcrEngine ocrEngine;
+    /** 复用图片入口的像素限制、增强和原生资源释放逻辑。 */
+    private final ImagePreprocessor imagePreprocessor;
 
-    public PdfDocumentParser(PlanProperties properties, OcrEngine ocrEngine) {
+    public PdfDocumentParser(PlanProperties properties, OcrEngine ocrEngine, ImagePreprocessor imagePreprocessor) {
         this.properties = properties;
         this.ocrEngine = ocrEngine;
+        this.imagePreprocessor = imagePreprocessor;
     }
 
     @Override
@@ -52,32 +68,65 @@ public class PdfDocumentParser implements DocumentParser {
 
     @Override
     public ParsedDocument parse(DownloadedDocument document) {
+        return parse(document, ProcessingProgressListener.NOOP);
+    }
+
+    @Override
+    /**
+     * 解析 PDF 并按处理阶段上报进度。
+     *
+     * @param document 已下载或上传的 PDF 临时文件
+     * @param listener 任务进度监听器，允许为空
+     * @return 合并所有页面后的结构化文档块
+     */
+    public ParsedDocument parse(DownloadedDocument document, ProcessingProgressListener listener) {
         long totalStarted = System.nanoTime();
+        ProcessingProgressListener progress = listener == null ? ProcessingProgressListener.NOOP : listener;
         try (PDDocument pdf = Loader.loadPDF(document.path().toFile())) {
             validatePageCount(pdf);
-            long textStarted = System.nanoTime();
-            List<DocumentBlock> textBlocks = extractTextBlocks(pdf);
-            long textMillis = elapsedMillis(textStarted);
-            if (effectiveTextLength(textBlocks) >= properties.getPdf().getTextMinChars()) {
-                log.info(
-                        "PDF 文本解析完成，fileName={}, pages={}, textMs={}, totalMs={}",
-                        document.fileName(), pdf.getNumberOfPages(), textMillis, elapsedMillis(totalStarted));
-                return new ParsedDocument(
-                        document.fileName(),
-                        document.fileType(),
-                        DocumentParseMode.PDF_TEXT,
-                        textBlocks,
-                        List.of());
+            PDFRenderer renderer = new PDFRenderer(pdf);
+            List<DocumentBlock> blocks = new ArrayList<>();
+            List<String> warnings = new ArrayList<>();
+            int textPages = 0;
+            int ocrPages = 0;
+            int pages = pdf.getNumberOfPages();
+            for (int pageIndex = 0; pageIndex < pages; pageIndex++) {
+                int pageNumber = pageIndex + 1;
+                long textStarted = System.nanoTime();
+                // 页面级决策是混合 PDF 正确性的关键：文本页不做 OCR，扫描页单独补 OCR。
+                List<DocumentBlock> pageBlocks = extractTextBlocks(pdf, pageNumber);
+                ProcessingMetrics.record("pdf_text_extract", textStarted);
+                if (effectiveTextLength(pageBlocks) >= properties.getPdf().getTextMinChars()) {
+                    blocks.addAll(pageBlocks);
+                    textPages++;
+                } else {
+                    progress.onProgress(
+                    // 只有有效文本不足的页面才进入高成本的渲染和 OCR 流程。
+                            ProcessingStage.OCR,
+                            Math.min(84, 35 + (int) Math.round((pageIndex * 49.0) / Math.max(1, pages))));
+                    blocks.addAll(ocrPage(document, renderer, pageIndex));
+                    ocrPages++;
+                }
             }
-            ParsedDocument parsed = parseByOcr(document, pdf);
+            DocumentParseMode mode = textPages > 0 && ocrPages > 0
+                    ? DocumentParseMode.HYBRID
+                    : (ocrPages > 0 ? DocumentParseMode.OCR : DocumentParseMode.PDF_TEXT);
+            if (ocrPages > 0) {
+                warnings.add(mode == DocumentParseMode.HYBRID
+                        ? "PDF 同时包含文本页和扫描页，扫描页已逐页使用 OCR 解析。"
+                        : "PDF 缺少有效文本，已逐页使用 OCR 解析。");
+            }
             log.info(
-                    "PDF OCR 解析完成，fileName={}, pages={}, textProbeMs={}, totalMs={}",
-                    document.fileName(), pdf.getNumberOfPages(), textMillis, elapsedMillis(totalStarted));
-            return parsed;
+                    "PDF 逐页解析完成，fileName={}, pages={}, textPages={}, ocrPages={}, mode={}, totalMs={}",
+                    document.fileName(), pages, textPages, ocrPages, mode, elapsedMillis(totalStarted));
+            return new ParsedDocument(
+                    document.fileName(), document.fileType(), mode, List.copyOf(blocks), List.copyOf(warnings));
         } catch (OcrException ex) {
             throw ex;
         } catch (IOException | RuntimeException ex) {
             throw new OcrException(HttpStatus.BAD_REQUEST, "DOCUMENT_PARSE_FAILED", "PDF 文档解析失败。", ex);
+        } finally {
+            ProcessingMetrics.record("pdf_total", totalStarted);
         }
     }
 
@@ -91,114 +140,134 @@ public class PdfDocumentParser implements DocumentParser {
         }
     }
 
-    private List<DocumentBlock> extractTextBlocks(PDDocument pdf) throws IOException {
+    private List<DocumentBlock> extractTextBlocks(PDDocument pdf, int page) throws IOException {
         List<DocumentBlock> blocks = new ArrayList<>();
         PDFTextStripper stripper = new PDFTextStripper();
-        for (int page = 1; page <= pdf.getNumberOfPages(); page++) {
-            stripper.setStartPage(page);
-            stripper.setEndPage(page);
-            String text = stripper.getText(pdf);
-            for (String line : text.split("\\R")) {
-                String cleaned = clean(line);
-                if (StringUtils.hasText(cleaned)) {
-                    blocks.add(new DocumentBlock(cleaned, page, inferHeadingLevel(cleaned), false, List.of()));
-                }
+        stripper.setStartPage(page);
+        stripper.setEndPage(page);
+        String text = stripper.getText(pdf);
+        for (String line : text.split("\\R")) {
+            String cleaned = clean(line);
+            if (StringUtils.hasText(cleaned)) {
+                blocks.add(new DocumentBlock(cleaned, page, inferHeadingLevel(cleaned), false, List.of()));
             }
         }
         return blocks;
     }
 
-    private ParsedDocument parseByOcr(DownloadedDocument document, PDDocument pdf) throws IOException {
-        List<DocumentBlock> blocks = new ArrayList<>();
-        List<Path> tempImages = new ArrayList<>();
-        PDFRenderer renderer = new PDFRenderer(pdf);
+    private List<DocumentBlock> ocrPage(
+    /**
+     * 渲染并识别单个扫描页，临时图片和预处理资源均在本方法结束前释放。
+     *
+     * @param pageIndex PDFBox 使用的零基页码
+     * @return 当前页转换得到的文档块
+     */
+            DownloadedDocument document,
+            PDFRenderer renderer,
+            int pageIndex) throws IOException {
+        long pageStarted = System.nanoTime();
+        long renderStarted = System.nanoTime();
+        BufferedImage bufferedImage = renderer.renderImageWithDPI(
+                pageIndex, properties.getPdf().getOcrDpi(), ImageType.RGB);
+        // BufferedImage 可能占用较大堆内存，用完后必须主动 flush。
+        ProcessingMetrics.record("pdf_render", renderStarted);
+
+        Path imagePath = Files.createTempFile("plan-pdf-page-", ".png");
         try {
-            for (int pageIndex = 0; pageIndex < pdf.getNumberOfPages(); pageIndex++) {
-                long pageStarted = System.nanoTime();
-                long renderStarted = System.nanoTime();
-                BufferedImage image = renderer.renderImageWithDPI(
-                        pageIndex,
-                        properties.getPdf().getOcrDpi(),
-                        ImageType.RGB);
-                long renderMillis = elapsedMillis(renderStarted);
-                Path imagePath = Files.createTempFile("plan-pdf-page-", ".png");
-                tempImages.add(imagePath);
-                long pngStarted = System.nanoTime();
-                ImageIO.write(image, "png", imagePath.toFile());
-                long pngMillis = elapsedMillis(pngStarted);
+            long pngStarted = System.nanoTime();
+        // 临时 PNG 仅作为当前 OCR 库的文件路径适配层，finally 中保证删除。
+            if (!ImageIO.write(bufferedImage, "png", imagePath.toFile())) {
+                throw new IOException("没有可用的 PNG 编码器。");
+            }
+            ProcessingMetrics.record("pdf_png_write", pngStarted);
+            long fileSize = Files.size(imagePath);
+            try (PreprocessedImage image = imagePreprocessor.preprocess(
+                    imagePath,
+                    document.fileName() + "-page-" + (pageIndex + 1) + ".png",
+                    "image/png",
+                    fileSize,
+                    true)) {
                 long ocrStarted = System.nanoTime();
-                OcrResult result = ocrEngine.recognize(imagePath);
-                long ocrMillis = elapsedMillis(ocrStarted);
-                log.info(
-                        "PDF OCR 页面完成，fileName={}, page={}, renderMs={}, pngMs={}, ocrMs={}, pageTotalMs={}",
-                        document.fileName(), pageIndex + 1, renderMillis, pngMillis, ocrMillis,
-                        elapsedMillis(pageStarted));
+                OcrResult result = ocrEngine.recognize(image.imagePath());
+                ProcessingMetrics.record("ocr", ocrStarted);
                 PageLines pageLines = restoreSidewaysResponseTable(
-                        document.fileName(), pageIndex + 1, image, result, tempImages);
-                if (pageLines.lines().isEmpty()) {
-                    continue;
-                }
-                int page = pageIndex + 1;
-                for (OcrLine line : pageLines.lines()) {
-                    String cleaned = clean(line.text());
-                    if (StringUtils.hasText(cleaned)) {
-                        blocks.add(new DocumentBlock(
-                                cleaned,
-                                page,
-                                inferHeadingLevel(cleaned),
-                                pageLines.table(),
-                                pageLines.table() ? List.of(cleaned) : List.of()));
+                        document.fileName(), pageIndex + 1, image.imagePath(), result);
+                List<DocumentBlock> blocks = new ArrayList<>();
+                if (!pageLines.lines().isEmpty()) {
+                    int page = pageIndex + 1;
+                    for (OcrLine line : pageLines.lines()) {
+                        String cleaned = clean(line.text());
+                        if (StringUtils.hasText(cleaned)) {
+                            blocks.add(new DocumentBlock(
+                                    cleaned,
+                                    page,
+                                    inferHeadingLevel(cleaned),
+                                    pageLines.table(),
+                                    pageLines.table() ? List.of(cleaned) : List.of()));
+                        }
                     }
                 }
+                log.info(
+                        "PDF OCR 页面完成，fileName={}, page={}, pageTotalMs={}, blocks={}",
+                        document.fileName(), pageIndex + 1, elapsedMillis(pageStarted), blocks.size());
+                return blocks;
             }
         } finally {
-            deleteTempImages(tempImages);
+            Files.deleteIfExists(imagePath);
+            bufferedImage.flush();
         }
-        return new ParsedDocument(
-                document.fileName(),
-                document.fileType(),
-                DocumentParseMode.OCR,
-                blocks,
-                List.of("PDF 为扫描件或不可直接抽取文本，已使用 OCR 解析，建议前端展示来源页供人工核对。"));
     }
 
+    /**
+     * 检测页面 OCR 中竖排分布的四级响应标题，并在旋转后按列重新识别。
+     * 未命中或补充识别失败时保留首次 OCR 结果，避免横倒表优化影响普通页面。
+     */
     private PageLines restoreSidewaysResponseTable(
             String fileName,
             int page,
-            BufferedImage image,
-            OcrResult initialResult,
-            List<Path> tempImages) {
+            Path recognizedImagePath,
+            OcrResult initialResult) {
         List<OcrLine> initialLines = safeLines(initialResult);
         if (!properties.getPdf().isSidewaysTableOcrEnabled()) {
             return new PageLines(initialLines, false);
         }
-        Optional<SidewaysTable> detected = detectSidewaysResponseTable(image, initialLines);
-        if (detected.isEmpty()) {
-            return new PageLines(initialLines, false);
-        }
-        long started = System.nanoTime();
-        SidewaysTable table = detected.get();
+        BufferedImage recognizedImage = null;
         try {
-            BufferedImage rotated = rotateRightAngle(image, table.clockwise());
-            List<OcrLine> columnLines = recognizeResponseColumns(rotated, table.columns(), tempImages);
-            if (columnLines.isEmpty()) {
+            recognizedImage = ImageIO.read(recognizedImagePath.toFile());
+            if (recognizedImage == null) {
                 return new PageLines(initialLines, false);
             }
-            log.info(
-                    "PDF 横倒响应表分列 OCR 完成，fileName={}, page={}, rotation={}, columns={}, tableOcrMs={}",
-                    fileName,
-                    page,
-                    table.clockwise() ? 90 : 270,
-                    table.columns().size(),
-                    elapsedMillis(started));
-            return new PageLines(columnLines, true);
+            Optional<SidewaysTable> detected = detectSidewaysResponseTable(recognizedImage, initialLines);
+            if (detected.isEmpty()) {
+                return new PageLines(initialLines, false);
+            }
+            long started = System.nanoTime();
+            SidewaysTable table = detected.get();
+            BufferedImage rotated = rotateRightAngle(recognizedImage, table.clockwise());
+            try {
+                List<OcrLine> columnLines = recognizeResponseColumns(
+                        rotated, table.columns(), fileName + "-page-" + page);
+                if (columnLines.isEmpty()) {
+                    return new PageLines(initialLines, false);
+                }
+                log.info(
+                        "PDF 横倒响应表分列 OCR 完成，fileName={}, page={}, rotation={}, columns={}, tableOcrMs={}",
+                        fileName,
+                        page,
+                        table.clockwise() ? 90 : 270,
+                        table.columns().size(),
+                        elapsedMillis(started));
+                return new PageLines(columnLines, true);
+            } finally {
+                rotated.flush();
+            }
         } catch (IOException | RuntimeException ex) {
-            log.warn(
-                    "PDF 横倒响应表分列 OCR 失败，已回退页面原始 OCR，fileName={}, page={}",
-                    fileName,
-                    page,
-                    ex);
+            log.warn("PDF 横倒响应表分列 OCR 失败，已回退页面原始 OCR，fileName={}, page={}", fileName, page, ex);
             return new PageLines(initialLines, false);
+        } finally {
+            if (recognizedImage != null) {
+                recognizedImage.flush();
+            }
         }
     }
 
@@ -258,8 +327,9 @@ public class PdfDocumentParser implements DocumentParser {
         return true;
     }
 
+    /** 每个表格列单独经过预处理和 OCR，延续普通 PDF 页面的像素与资源限制。 */
     private List<OcrLine> recognizeResponseColumns(
-            BufferedImage image, List<ColumnAnchor> columns, List<Path> tempImages) throws IOException {
+            BufferedImage image, List<ColumnAnchor> columns, String logicalFileName) throws IOException {
         int columnCount = columns.size();
         double[] edges = new double[columnCount + 1];
         edges[0] = Math.max(0, columns.get(0).centerX()
@@ -280,11 +350,34 @@ public class PdfDocumentParser implements DocumentParser {
                 continue;
             }
             BufferedImage columnImage = image.getSubimage(left, top, right - left, image.getHeight() - top);
-            OcrResult columnResult = recognizeImage(columnImage, tempImages, "plan-pdf-response-column-");
-            result.addAll(trimColumnLines(
-                    safeLines(columnResult), columns.get(i).level(), columns.get(i).originalText()));
+            try {
+                OcrResult columnResult = recognizeImage(
+                        columnImage, logicalFileName + "-response-column-" + (i + 1) + ".png");
+                result.addAll(trimColumnLines(
+                        safeLines(columnResult), columns.get(i).level(), columns.get(i).originalText()));
+            } finally {
+                columnImage.flush();
+            }
         }
         return List.copyOf(result);
+    }
+
+    private OcrResult recognizeImage(BufferedImage image, String logicalFileName) throws IOException {
+        Path path = Files.createTempFile("plan-pdf-response-column-", ".png");
+        try {
+            if (!ImageIO.write(image, "png", path.toFile())) {
+                throw new IOException("无法写入 PDF OCR 临时图片：" + path);
+            }
+            try (PreprocessedImage preprocessed = imagePreprocessor.preprocess(
+                    path, logicalFileName, "image/png", Files.size(path), true)) {
+                long ocrStarted = System.nanoTime();
+                OcrResult result = ocrEngine.recognize(preprocessed.imagePath());
+                ProcessingMetrics.record("ocr", ocrStarted);
+                return result;
+            }
+        } finally {
+            Files.deleteIfExists(path);
+        }
     }
 
     private List<OcrLine> trimColumnLines(List<OcrLine> lines, String level, String fallbackHeading) {
@@ -312,15 +405,6 @@ public class PdfDocumentParser implements DocumentParser {
             result.add(line);
         }
         return result;
-    }
-
-    private OcrResult recognizeImage(BufferedImage image, List<Path> tempImages, String prefix) throws IOException {
-        Path path = Files.createTempFile(prefix, ".png");
-        tempImages.add(path);
-        if (!ImageIO.write(image, "png", path.toFile())) {
-            throw new IOException("无法写入 PDF OCR 临时图片：" + path);
-        }
-        return ocrEngine.recognize(path);
     }
 
     private BufferedImage rotateRightAngle(BufferedImage source, boolean clockwise) {
@@ -402,16 +486,6 @@ public class PdfDocumentParser implements DocumentParser {
                 .replaceAll("[\\t\\r\\n]+", " ")
                 .replaceAll("\\s+", " ")
                 .trim();
-    }
-
-    private void deleteTempImages(List<Path> tempImages) {
-        for (Path tempImage : tempImages) {
-            try {
-                Files.deleteIfExists(tempImage);
-            } catch (IOException ex) {
-                log.warn("PDF OCR 临时图片清理失败，path={}", tempImage, ex);
-            }
-        }
     }
 
     private long elapsedMillis(long started) {

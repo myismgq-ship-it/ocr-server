@@ -89,7 +89,9 @@ class OcrRecognitionServiceTest {
                         new OcrLine("（闽）FM安许证字（2024）E01号", 0.95, List.of(new OcrPoint(0, 0)))));
             }
         };
-        OcrRecognitionService service = new OcrRecognitionService(preprocessor, engine, new OcrProperties());
+        OcrProperties properties = new OcrProperties();
+        properties.getPreprocess().setMultiPassMinConfidence(0.95);
+        OcrRecognitionService service = new OcrRecognitionService(preprocessor, engine, properties);
         MockMultipartFile file = new MockMultipartFile("file", "demo.png", "image/png", new byte[] {1, 2, 3});
 
         var response = service.recognize(file);

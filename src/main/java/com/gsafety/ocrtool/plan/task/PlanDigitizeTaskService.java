@@ -15,11 +15,19 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 import tools.jackson.databind.ObjectMapper;
 
+/**
+ * 异步任务中心的应用服务。
+ *
+ * <p>负责创建去重、分页查询、失败重试、取消和向后兼容的响应映射，不直接执行 OCR。</p>
+ */
 @Service
 public class PlanDigitizeTaskService {
 
+    /** 任务元数据和状态持久化。 */
     private final PlanDigitizeTaskRepository repository;
+    /** 上传任务源文件持久化和安全清理。 */
     private final PlanTaskStorageService storageService;
+    /** 完成结果 JSON 与响应对象之间的转换器。 */
     private final ObjectMapper objectMapper;
 
     public PlanDigitizeTaskService(
@@ -31,14 +39,21 @@ public class PlanDigitizeTaskService {
         this.objectMapper = objectMapper;
     }
 
+    /**
+     * 上传文档并创建任务；同一预案已有活动任务时直接复用。
+     *
+     * @return 新任务或当前活动任务，响应中的 reused 标识是否复用
+     */
     public PlanDigitizeTaskResponse createUpload(String planId, MultipartFile file) {
         validatePlanId(planId);
+        // 先做快速查询减少无谓文件落盘，数据库唯一索引仍是最终并发保护。
         var active = repository.findActive(planId);
         if (active.isPresent()) {
             return toResponse(active.get(), true);
         }
         UUID taskId = UUID.randomUUID();
         StoredTaskFile stored = storageService.store(taskId, file);
+        // 文件必须先成功持久化才能入库；后续任何入库失败都要删除本次文件。
         PlanDigitizeTask task = newTask(
                 taskId, planId, PlanDigitizeTaskSourceType.UPLOAD, stored, null, null);
         try {
@@ -53,6 +68,9 @@ public class PlanDigitizeTaskService {
         }
     }
 
+    /**
+     * 为远程文档 URL 创建异步任务，同一预案活动任务保持唯一。
+     */
     public PlanDigitizeTaskResponse createUrl(String planId, String documentUrl) {
         validatePlanId(planId);
         validateDocumentUrl(documentUrl);
@@ -71,23 +89,32 @@ public class PlanDigitizeTaskService {
         }
     }
 
+    /** 查询指定任务详情和结果。 */
     public PlanDigitizeTaskResponse get(String planId, UUID taskId) {
         validatePlanId(planId);
         return toResponse(find(planId, taskId), false);
     }
 
+    /** 查询预案最新一次任务。 */
     public PlanDigitizeTaskResponse latest(String planId) {
         validatePlanId(planId);
         return toResponse(repository.findLatest(planId).orElseThrow(() -> notFound("未找到预案数字化任务。")), false);
     }
 
+    /**
+     * 分页查询任务历史，页码最小为 0、每页最大为 100。
+     */
     public PlanDigitizeTaskPageResponse history(String planId, int page, int size) {
         validatePlanId(planId);
         int safePage = Math.max(0, page);
         int safeSize = Math.min(100, Math.max(1, size));
+        long offset = (long) safePage * safeSize;
+        if (offset > Integer.MAX_VALUE) {
+            throw new OcrException(HttpStatus.BAD_REQUEST, "INVALID_PAGE", "分页位置超过允许范围。");
+        }
         long total = repository.countHistory(planId);
         List<PlanDigitizeTaskResponse> items = repository
-                .findHistory(planId, safeSize, safePage * safeSize)
+                .findHistory(planId, safeSize, (int) offset)
                 .stream()
                 .map(task -> toResponse(task, false))
                 .toList();
@@ -95,6 +122,11 @@ public class PlanDigitizeTaskService {
         return new PlanDigitizeTaskPageResponse(items, safePage, safeSize, total, totalPages);
     }
 
+    /**
+     * 从失败任务创建一次新的重试任务。
+     *
+     * <p>上传任务复制保留的源文件；URL 任务复用原地址，但始终生成新的任务 ID 和领取尝试。</p>
+     */
     public PlanDigitizeTaskResponse retry(String planId, UUID failedTaskId) {
         validatePlanId(planId);
         PlanDigitizeTask failed = find(planId, failedTaskId);
@@ -127,6 +159,31 @@ public class PlanDigitizeTaskService {
         }
     }
 
+    /**
+     * 取消排队中或运行中的任务，并尽力清理上传源文件。
+     */
+    public PlanDigitizeTaskResponse cancel(String planId, UUID taskId) {
+        validatePlanId(planId);
+        PlanDigitizeTask task = find(planId, taskId);
+        if (task.status() == PlanDigitizeTaskStatus.COMPLETED
+                || task.status() == PlanDigitizeTaskStatus.FAILED
+                || task.status() == PlanDigitizeTaskStatus.CANCELLED) {
+            return toResponse(task, false);
+        }
+        // 数据库取消会清空 claimToken，正在运行的旧执行者后续更新将自然失败。
+        if (repository.cancel(planId, taskId, OffsetDateTime.now()) == 0) {
+            return toResponse(find(planId, taskId), false);
+        }
+        if (task.sourceType() == PlanDigitizeTaskSourceType.UPLOAD
+                && storageService.delete(task.sourcePath())) {
+            repository.clearSourcePath(taskId);
+        }
+        return toResponse(find(planId, taskId), false);
+    }
+
+    /**
+     * 构造初始 QUEUED 任务快照，所有运行时字段从零值开始。
+     */
     private PlanDigitizeTask newTask(
             UUID taskId,
             String planId,
@@ -150,6 +207,11 @@ public class PlanDigitizeTaskService {
                 null,
                 null,
                 null,
+                null,
+                null,
+                "QUEUED",
+                0,
+                0,
                 null,
                 retryOf,
                 now,
@@ -177,7 +239,12 @@ public class PlanDigitizeTaskService {
                 task.errorCode(),
                 task.errorMessage(),
                 reused,
-                readResult(task.resultJson()));
+                readResult(task.resultJson()),
+                task.stage(),
+                task.progressPercent(),
+                task.attempt(),
+                task.updatedAt(),
+                task.ruleVersion());
     }
 
     private PlanDigitizeResponse readResult(String json) {

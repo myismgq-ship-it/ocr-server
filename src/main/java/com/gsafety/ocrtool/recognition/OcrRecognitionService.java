@@ -19,13 +19,22 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
+/**
+ * 通用图片 OCR 编排服务。
+ *
+ * <p>负责预处理、按质量自适应补跑原图、汇总置信度以及批量任务的单文件故障隔离，
+ * 不包含具体证照字段抽取规则。</p>
+ */
 @Service
 public class OcrRecognitionService {
 
     private static final Logger log = LoggerFactory.getLogger(OcrRecognitionService.class);
 
+    /** 图片校验、增强和临时资源生命周期管理。 */
     private final ImagePreprocessor imagePreprocessor;
+    /** 已组合本地/备用策略的 OCR 引擎入口。 */
     private final OcrEngine ocrEngine;
+    /** 自适应双通道识别阈值等 OCR 配置。 */
     private final OcrProperties properties;
 
     public OcrRecognitionService(ImagePreprocessor imagePreprocessor, OcrEngine ocrEngine, OcrProperties properties) {
@@ -34,6 +43,12 @@ public class OcrRecognitionService {
         this.properties = properties;
     }
 
+    /**
+     * 识别单张图片并返回文本、坐标、置信度和预处理信息。
+     *
+     * @param file 上传图片
+     * @return 产品化 OCR 响应
+     */
     public OcrRecognizeResponse recognize(MultipartFile file) {
         long startedAt = System.nanoTime();
         try (PreprocessedImage image = imagePreprocessor.preprocess(file)) {
@@ -65,6 +80,12 @@ public class OcrRecognitionService {
         return new OcrResult(response.text(), response.lines());
     }
 
+    /**
+     * 批量识别图片；任意单文件失败只记录在对应结果项中。
+     *
+     * @param files 待识别图片集合
+     * @return 包含成功/失败统计的批量结果
+     */
     public OcrBatchResponse recognizeBatch(MultipartFile[] files) {
         if (files == null || files.length == 0) {
             throw new OcrException(HttpStatus.BAD_REQUEST, "EMPTY_FILE", "批量识别图片不能为空。");
@@ -120,12 +141,17 @@ public class OcrRecognitionService {
         return (System.nanoTime() - startedAt) / 1_000_000;
     }
 
+    /**
+     * 先识别预处理图，只有结果不足时才补跑原图并选择质量更高的结果。
+     */
     private OcrResult recognizeBestPass(PreprocessedImage image) {
         OcrResult preprocessed = ocrEngine.recognize(image.imagePath());
-        if (!properties.getPreprocess().isMultiPass() || image.imagePath().equals(image.originalImagePath())) {
+        // 预处理图是主通道，清晰样本只执行一次 OCR，避免固定双通道带来的耗时翻倍。
+        if (!shouldRunSupplement(image, preprocessed)) {
             return preprocessed;
         }
         try {
+            // 原图仅作为低文本量或低置信度结果的补充通道。
             OcrResult original = ocrEngine.recognize(image.originalImagePath());
             if (score(original) > score(preprocessed)) {
                 log.info("OCR 原图识别结果优于预处理图，fileName={}, originalScore={}, preprocessedScore={}",
@@ -139,7 +165,29 @@ public class OcrRecognitionService {
         return preprocessed;
     }
 
+    private boolean shouldRunSupplement(PreprocessedImage image, OcrResult result) {
+    /**
+     * 根据文本长度和平均置信度判断是否需要补充识别原图。
+     */
+        if (!properties.getPreprocess().isMultiPass()
+                || image.imagePath().equals(image.originalImagePath())) {
+            return false;
+        }
+        int textLength = result.text() == null
+                ? 0
+                : result.text().replaceAll("\\s+", "").length();
+        if (textLength < Math.max(0, properties.getPreprocess().getMultiPassMinTextChars())) {
+            return true;
+        }
+        Double confidence = averageConfidence(result.lines());
+        return confidence == null
+                || confidence < properties.getPreprocess().getMultiPassMinConfidence();
+    }
+
     private OcrResult mergePassText(OcrResult primary, OcrResult supplement) {
+    /**
+     * 保留主结果坐标，并按去重后的行文本合并补充通道内容。
+     */
         List<String> texts = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>();
         addUniqueText(texts, seen, primary);

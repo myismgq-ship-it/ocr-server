@@ -12,23 +12,34 @@ import io.github.mymonstercat.ocr.config.ParamConfig;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Semaphore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
+/**
+ * RapidOCR 本地推理引擎适配器。
+ *
+ * <p>模型采用延迟初始化；并发信号量保护底层原生推理实例，默认并行度为 1，
+ * 只有在目标模型版本通过线程安全和内存压测后才应提高。</p>
+ */
 @Component
 public class RapidOcrEngine implements OcrEngine {
 
     private static final Logger log = LoggerFactory.getLogger(RapidOcrEngine.class);
-    private static final String DEFAULT_MODEL = "ONNX_PPOCR_V3";
+    private static final String DEFAULT_MODEL = "ONNX_PPOCR_V4";
 
     private final OcrProperties properties;
+    /** 控制同时进入底层原生推理实例的请求数，避免全局 synchronized 的无界等待。 */
+    private final Semaphore permits;
+    /** 延迟初始化的 RapidOCR 推理实例；volatile 保证双重检查时的可见性。 */
     private volatile InferenceEngine engine;
 
     public RapidOcrEngine(OcrProperties properties) {
         this.properties = properties;
+        this.permits = new Semaphore(Math.max(1, properties.getRapid().getMaxConcurrency()), true);
     }
 
     @Override
@@ -36,25 +47,36 @@ public class RapidOcrEngine implements OcrEngine {
         return "rapidocr";
     }
 
+    /**
+     * 对已落盘图片执行本地 OCR。
+     *
+     * @param imagePath 图片文件路径
+     * @return 统一格式的文本和坐标结果
+     */
     @Override
     public OcrResult recognize(Path imagePath) {
         if (!properties.getRapid().isEnabled()) {
             throw new OcrException(HttpStatus.SERVICE_UNAVAILABLE, "OCR_DISABLED", "OCR 服务未启用。");
         }
+        permits.acquireUninterruptibly();
+        // permit 必须在 finally 中归还，异常不能永久占用 OCR 并发槽位。
         try {
             ParamConfig paramConfig = ParamConfig.getDefaultConfig();
             paramConfig.setDoAngle(true);
             paramConfig.setMostAngle(true);
-            synchronized (this) {
-                return toResult(getEngine().runOcr(imagePath.toString(), paramConfig));
-            }
+            return toResult(getEngine().runOcr(imagePath.toString(), paramConfig));
         } catch (OcrException ex) {
             throw ex;
         } catch (RuntimeException ex) {
             throw new OcrException(HttpStatus.INTERNAL_SERVER_ERROR, "OCR_ENGINE_FAILED", "OCR 识别失败。", ex);
+        } finally {
+            permits.release();
         }
     }
 
+    /**
+     * 以双重检查方式初始化重量级推理实例，避免每次识别重复加载模型。
+     */
     private InferenceEngine getEngine() {
         InferenceEngine current = engine;
         if (current != null) {

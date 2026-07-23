@@ -18,6 +18,11 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
+/**
+ * 预案同步解析和异步任务中心 HTTP 入口。
+ *
+ * <p>保留原同步路径，同时提供向后兼容的创建、详情、历史、重试和取消接口。</p>
+ */
 import org.springframework.web.multipart.MultipartFile;
 
 @RestController
@@ -67,6 +72,7 @@ public class PlanDigitizeController {
         return planDigitizeService.digitize(file);
     }
 
+    /** 上传文档并创建异步任务。 */
     @PostMapping("/{planId}/digitize/tasks/upload")
     public ResponseEntity<PlanDigitizeTaskResponse> createUploadTask(
             @PathVariable("planId") String planId,
@@ -74,37 +80,50 @@ public class PlanDigitizeController {
         return ResponseEntity.accepted().body(taskService.createUpload(planId, file));
     }
 
-//    @PostMapping("/{planId}/digitize/tasks")
-//    public ResponseEntity<PlanDigitizeTaskResponse> createUrlTask(
-//            @PathVariable("planId") String planId,
-//            @Valid @RequestBody PlanDigitizeRequest request) {
-//        return ResponseEntity.accepted().body(taskService.createUrl(planId, request.documentUrl()));
-//    }
+    /** 使用远程文档 URL 创建异步任务。 */
+    @PostMapping("/{planId}/digitize/tasks")
+    public ResponseEntity<PlanDigitizeTaskResponse> createUrlTask(
+            @PathVariable("planId") String planId,
+            @Valid @RequestBody PlanDigitizeRequest request) {
+        return ResponseEntity.accepted().body(taskService.createUrl(planId, request.documentUrl()));
+    }
 
+    /** 查询预案最新一次任务。 */
     @GetMapping("/{planId}/digitize/tasks/latest")
     public PlanDigitizeTaskResponse latestTask(@PathVariable("planId") String planId) {
         return taskService.latest(planId);
     }
 
-//    @GetMapping("/{planId}/digitize/tasks/{taskId}")
-//    public PlanDigitizeTaskResponse getTask(
-//            @PathVariable("planId") String planId,
-//            @PathVariable("taskId") UUID taskId) {
-//        return taskService.get(planId, taskId);
-//    }
-//
-//    @GetMapping("/{planId}/digitize/tasks")
-//    public PlanDigitizeTaskPageResponse taskHistory(
-//            @PathVariable("planId") String planId,
-//            @RequestParam(name = "page", defaultValue = "0") int page,
-//            @RequestParam(name = "size", defaultValue = "20") int size) {
-//        return taskService.history(planId, page, size);
-//    }
-//
-//    @PostMapping("/{planId}/digitize/tasks/{taskId}/retry")
-//    public ResponseEntity<PlanDigitizeTaskResponse> retryTask(
-//            @PathVariable("planId") String planId,
-//            @PathVariable("taskId") UUID taskId) {
-//        return ResponseEntity.accepted().body(taskService.retry(planId, taskId));
-//    }
+    /** 按 taskId 查询任务详情。 */
+    @GetMapping("/{planId}/digitize/tasks/{taskId}")
+    public PlanDigitizeTaskResponse getTask(
+            @PathVariable("planId") String planId,
+            @PathVariable("taskId") UUID taskId) {
+        return taskService.get(planId, taskId);
+    }
+
+    /** 分页查询预案任务历史。 */
+    @GetMapping("/{planId}/digitize/tasks")
+    public PlanDigitizeTaskPageResponse taskHistory(
+            @PathVariable("planId") String planId,
+            @RequestParam(name = "page", defaultValue = "0") int page,
+            @RequestParam(name = "size", defaultValue = "20") int size) {
+        return taskService.history(planId, page, size);
+    }
+
+    /** 为失败任务创建新的重试任务。 */
+    @PostMapping("/{planId}/digitize/tasks/{taskId}/retry")
+    public ResponseEntity<PlanDigitizeTaskResponse> retryTask(
+            @PathVariable("planId") String planId,
+            @PathVariable("taskId") UUID taskId) {
+        return ResponseEntity.accepted().body(taskService.retry(planId, taskId));
+    }
+
+    /** 取消排队中或运行中的任务。 */
+    @PostMapping("/{planId}/digitize/tasks/{taskId}/cancel")
+    public PlanDigitizeTaskResponse cancelTask(
+            @PathVariable("planId") String planId,
+            @PathVariable("taskId") UUID taskId) {
+        return taskService.cancel(planId, taskId);
+    }
 }

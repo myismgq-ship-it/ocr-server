@@ -19,21 +19,42 @@ import java.util.regex.Pattern;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
+/**
+ * 将已解析文档块切分为预案业务结构。
+ *
+ * <p>规则快照负责章节范围、级别别名、内容标记和继承关系；
+ * 代码中的正则只承担通用版式容错和候选评分。</p>
+ */
 @Service
 public class PlanSegmentService {
 
+    /** 行动组标题的通用版式模式，数据库 MARKER 规则用于补充业务入口词。 */
     private static final Pattern ACTION_GROUP_PATTERN = Pattern.compile(
             "(?:[（(]?\\d+[）)]\\s*)?([\\p{IsHan}A-Za-z0-9]{2,24}(?:工作组|保障组|指挥组|协调组|处置组|救援组|专家组|行动组|组))(?=[:：。\\s]|$)");
+    /** “下设……等工作组”类行内行动组列表。 */
     private static final Pattern INLINE_GROUPS_PATTERN = Pattern.compile("下设(.{2,120}?)等(?:专项)?工作组");
 
+    /** 默认规则快照提供器。 */
     private final SegmentRuleProvider ruleProvider;
 
     public PlanSegmentService(SegmentRuleProvider ruleProvider) {
         this.ruleProvider = ruleProvider;
     }
 
+    /**
+     * 使用当前已发布规则快照解析一份文档。
+     */
     public SegmentResult extract(ParsedDocument document) {
-        SegmentRules rules = ruleProvider.currentRules();
+        return extract(document, ruleProvider.currentRules());
+    }
+
+    /**
+     * 使用调用方指定的不可变规则快照解析文档。
+     *
+     * @param document 文档解析器生成的有序块
+     * @param rules 本次文档全程固定使用的规则快照
+     */
+    public SegmentResult extract(ParsedDocument document, SegmentRules rules) {
         List<String> warnings = new ArrayList<>();
         SegmentSection commandSystem = findBestSection(
                 rules.commandKey(), null, rules.commandAliases(), document.blocks(), warnings, rules)
@@ -52,20 +73,76 @@ public class PlanSegmentService {
                 responseLevels.add(section.get());
             } else {
                 warnings.add("未识别到" + entry.getKey() + "内容。");
+        // SECTION 规则只在范围唯一且边界明确时缩小扫描区域；存在多个候选时回退全文，
+        // 避免“响应条件”和“响应措施”分布在不同章节时被错误截断。
             }
         }
+        List<DocumentBlock> warningBlocks = scopedBlocks(document.blocks(), "warning_scope", rules);
+        List<DocumentBlock> emergencyBlocks = scopedBlocks(document.blocks(), "emergency_scope", rules);
+        List<DocumentBlock> actionGroupBlocks = scopedBlocks(document.blocks(), "action_group_scope", rules);
         List<ResponseLevelSegment> warningResponses = extractLevels(
-                "WARNING", levelDefinitions(true, rules), document.blocks(), rules, warnings);
+                "WARNING", levelDefinitions(true, rules), warningBlocks, rules, warnings);
         List<ResponseLevelSegment> emergencyResponses = extractLevels(
-                "EMERGENCY", levelDefinitions(false, rules), document.blocks(), rules, warnings);
-        List<ActionGroupSegment> actionGroups = extractActionGroups(document.blocks());
+                "EMERGENCY", levelDefinitions(false, rules), emergencyBlocks, rules, warnings);
+        List<ActionGroupSegment> actionGroups = extractActionGroups(actionGroupBlocks, rules);
         return new SegmentResult(
                 commandSystem,
                 responseLevels,
                 warningResponses,
                 emergencyResponses,
                 actionGroups,
-                warnings);
+                warnings,
+                rules.version());
+    }
+
+    /**
+     * 根据 SECTION 别名定位一个明确的业务章节。
+     *
+     * <p>同一个别名可能同时出现在“响应分级”“应急响应”和各级响应子章节中，
+     * 因此只有正文中恰好存在一个范围候选时才裁剪；多候选、无候选或范围内没有
+     * 正文时均回退全文。SECTION 是召回范围提示，不能成为丢弃其他章节的硬过滤器。</p>
+     */
+    private List<DocumentBlock> scopedBlocks(
+            List<DocumentBlock> blocks, String sectionCode, SegmentRules rules) {
+        List<String> aliases = rules.sectionAliases().get(sectionCode);
+        if (aliases == null || aliases.isEmpty()) {
+            return blocks;
+        }
+        List<Integer> candidates = new ArrayList<>();
+        for (int i = 0; i < blocks.size(); i++) {
+            DocumentBlock block = blocks.get(i);
+            String alias = matchingAlias(block.text(), aliases);
+            if (alias != null
+                    && !isTocBlock(block)
+                    && (block.heading() || block.table())
+                    && normalize(block.text()).length() <= normalize(alias).length() + 20) {
+                candidates.add(i);
+            }
+        }
+        if (candidates.size() != 1) {
+            return blocks;
+        }
+        int start = candidates.get(0);
+        DocumentBlock anchor = blocks.get(start);
+        int anchorLevel = anchor.headingLevel() > 0 ? anchor.headingLevel() : 2;
+        int end = blocks.size();
+        for (int i = start + 1; i < blocks.size(); i++) {
+            DocumentBlock block = blocks.get(i);
+            boolean nextConfiguredSection = rules.sectionAliases().values().stream()
+                    .flatMap(List::stream)
+                    .anyMatch(alias -> matchingAlias(block.text(), List.of(alias)) != null)
+                    && (block.heading() || block.table());
+            if (nextConfiguredSection) {
+                end = i;
+                break;
+            }
+            if (block.headingLevel() > 0 && block.headingLevel() <= anchorLevel) {
+                end = i;
+                break;
+            }
+        }
+        // 只有标题没有正文通常是宽泛别名误命中，继续扫描全文更安全。
+        return end > start + 1 ? blocks.subList(start, end) : blocks;
     }
 
     private List<LevelDefinition> levelDefinitions(boolean warning, SegmentRules rules) {
@@ -111,6 +188,11 @@ public class PlanSegmentService {
                 List.of("四级响应", "四级应急响应", "Ⅳ级响应", "IV级响应", "一般响应"));
     }
 
+    /**
+     * 提取四级预警或响应，并分别归类启动条件、直接措施和继承措施。
+     *
+     * <p>固定返回四级结果，未命中项使用 MISSING，而不是从响应中删除。</p>
+     */
     private List<ResponseLevelSegment> extractLevels(
             String category,
             List<LevelDefinition> definitions,
@@ -131,6 +213,14 @@ public class PlanSegmentService {
                 if (!matchesLevelDefinition(block.text(), definition)) {
                     continue;
                 }
+                // 预案常把启动条件直接写成“符合……时，启动一级响应”，没有独立的
+                // “一级响应”标题。此类正文是有效条件证据，不能按普通级别引用丢弃。
+                if (isExplicitActivationCondition(block.text())
+                        && contextKind(category, i, blocks, rules) == ContentKind.CONDITION
+                        && !isResponseLifecycleReference(block.text())) {
+                    levels.get(definition.key()).addCondition(block);
+                    continue;
+                }
                 if (!isPrimaryLevelMention(block, definition, definitions)) {
                     continue;
                 }
@@ -140,7 +230,7 @@ public class PlanSegmentService {
             }
         }
         if ("WARNING".equals(category)) {
-            applyWarningInheritance(levels, definitions);
+            applyWarningInheritance(levels, definitions, rules);
         }
         List<ResponseLevelSegment> result = new ArrayList<>();
         for (MutableLevel level : levels.values()) {
@@ -239,14 +329,23 @@ public class PlanSegmentService {
         if (index <= 0 || !looksLikeCondition(blocks.get(index - 1).text())) {
             return false;
         }
+        // 一整句“符合……条件时，建议启动二级响应”是新的独立条件，
+        // 只有“启动二级响应：”这类短行才是上一条件单元的续行。
+        if (isExplicitActivationCondition(blocks.get(index).text())) {
+            return false;
+        }
         String text = normalize(blocks.get(index).text());
-        return text.contains("响应") && (text.contains("启动") || text.startsWith("动"));
+        return text.length() <= 24
+                && text.contains("响应") && (text.contains("启动") || text.startsWith("动"));
     }
 
     private boolean matchesAnyLevel(String text, List<LevelDefinition> definitions) {
-        return definitions.stream().anyMatch(definition -> matchingAlias(text, definition.aliases()) != null);
+        return definitions.stream().anyMatch(definition -> matchesLevelDefinition(text, definition));
     }
 
+    /**
+     * 按数据库 MARKER 规则在一个级别窗口内区分条件和措施。
+     */
     private CandidateParts classifyLevelWindow(
             String category, int start, int end, List<DocumentBlock> blocks, SegmentRules rules) {
         List<DocumentBlock> conditions = new ArrayList<>();
@@ -262,9 +361,6 @@ public class PlanSegmentService {
             if (isStructuralMarker(
                     block, text, rules, "activation_condition", List.of("启动条件", "响应条件", "发布条件"))) {
                 kind = ContentKind.CONDITION;
-                if (isStandaloneMarker(text)) {
-                    continue;
-                }
             }
             if (isStructuralMarker(
                     block, text, rules, "response_measure", List.of("响应措施", "应急措施", "处置措施", "协调措施"))) {
@@ -282,6 +378,16 @@ public class PlanSegmentService {
     }
 
     private ContentKind contextKind(String category, int start, List<DocumentBlock> blocks, SegmentRules rules) {
+        DocumentBlock anchorBlock = blocks.get(start);
+        String anchor = anchorBlock.text();
+        // “5.2.1 一级应急响应”是明确的响应措施入口，应优先于更早的
+        // “4.3 应急响应分级”条件上下文，避免跨主章节错误继承内容类型。
+        if (!anchorBlock.table()
+                && anchorBlock.heading()
+                && !anchor.contains("条件")
+                && normalize(anchor).matches("^\\d+(?:\\.\\d+){1,4}.*响应.*")) {
+            return ContentKind.MEASURE;
+        }
         for (int i = start; i >= Math.max(0, start - 12); i--) {
             DocumentBlock block = blocks.get(i);
             boolean condition = isStructuralMarker(
@@ -300,15 +406,8 @@ public class PlanSegmentService {
                 return condition ? ContentKind.CONDITION : ContentKind.MEASURE;
             }
         }
-        DocumentBlock anchorBlock = blocks.get(start);
-        String anchor = anchorBlock.text();
         if ("WARNING".equals(category) && anchor.contains("预警") && !anchor.contains("响应")) {
             return ContentKind.CONDITION;
-        }
-        if (!anchorBlock.table()
-                && anchorBlock.heading()
-                && normalize(anchor).matches("^\\d+(?:\\.\\d+){1,4}.*响应.*")) {
-            return ContentKind.MEASURE;
         }
         if (anchor.matches(".*(启动|实施).{0,12}(响应|预警响应).*")) {
             return ContentKind.MEASURE;
@@ -322,11 +421,18 @@ public class PlanSegmentService {
             SegmentRules rules,
             String code,
             List<String> defaults) {
-        List<String> markers = rules.markerAliases().getOrDefault(code, defaults);
+        // 数据库规则用于补充业务别名，不能覆盖通用默认标记，否则发布一条
+        // “启动条件”后会意外丢失“响应分级”等基础识别能力。
+        List<String> markers = new ArrayList<>(defaults);
+        markers.addAll(rules.markerAliases().getOrDefault(code, List.of()));
         if (markers.stream().noneMatch(text::contains)) {
             return false;
         }
         if (isStandaloneMarker(text) || block.heading()) {
+            return true;
+        }
+        // “在某级基础上，加强以下应急措施：”不是标题块，但冒号明确表示后续内容类型。
+        if (text.trim().matches(".*(?:以下)?(?:响应|应急|处置|协调)?措施[:：]$")) {
             return true;
         }
         String value = stripSectionNumber(normalize(text));
@@ -345,6 +451,17 @@ public class PlanSegmentService {
     private boolean looksLikeCondition(String text) {
         return text.matches(".*(发生|预计|达到|符合|出现|超过|低于|造成|可能发生|不能控|无法控).*")
                 && !text.matches(".*(组织|开展|调度|派出|加强|负责|协调).*");
+    }
+
+    /**
+     * 判断正文是否明确表达某级响应/预警的启动关系。
+     *
+     * <p>仅出现“二级响应不能控制”等跨级条件引用不算独立候选，避免把同一条
+     * 一级启动条件同时写入二级结果。</p>
+     */
+    private boolean isExplicitActivationCondition(String text) {
+        return text.matches(".*(发生|预计|达到|符合|出现|超过|低于|造成|可能发生|不能控|无法控).*")
+                && text.matches(".*(启动|实施|进入|发布).{0,30}(响应|预警).*");
     }
 
     private boolean isResponseLifecycleReference(String text) {
@@ -370,7 +487,17 @@ public class PlanSegmentService {
         return false;
     }
 
-    private void applyWarningInheritance(Map<String, MutableLevel> levels, List<LevelDefinition> definitions) {
+    /**
+     * 解析“在某级基础上”等继承表达式，并展开为最终有效措施。
+     *
+     * <p>展开过程带环检测，错误配置不会造成无限递归。</p>
+     */
+    private void applyWarningInheritance(
+            Map<String, MutableLevel> levels,
+            List<LevelDefinition> definitions,
+            SegmentRules rules) {
+        List<String> inheritanceMarkers = rules.markerAliases()
+                .getOrDefault("inheritance", List.of("基础上"));
         for (MutableLevel target : levels.values()) {
             String direct = target.directMeasures();
             if (!StringUtils.hasText(direct)) {
@@ -381,7 +508,9 @@ public class PlanSegmentService {
                     continue;
                 }
                 boolean referenced = source.aliases().stream()
-                        .anyMatch(alias -> direct.matches("(?s).*" + Pattern.quote(alias) + ".{0,20}基础上.*"));
+                        .anyMatch(alias -> inheritanceMarkers.stream().anyMatch(marker ->
+                                direct.matches("(?s).*" + Pattern.quote(alias)
+                                        + ".{0,20}" + Pattern.quote(marker) + ".*")));
                 if (referenced) {
                     target.addInherited(source.key());
                 }
@@ -424,7 +553,11 @@ public class PlanSegmentService {
         });
     }
 
-    private List<ActionGroupSegment> extractActionGroups(List<DocumentBlock> blocks) {
+    /**
+     * 从章节标题、行内列表和 MARKER 入口中提取行动组及职责。
+     */
+    private List<ActionGroupSegment> extractActionGroups(
+            List<DocumentBlock> blocks, SegmentRules rules) {
         Map<String, MutableActionGroup> groups = new LinkedHashMap<>();
         for (int i = 0; i < blocks.size(); i++) {
             DocumentBlock block = blocks.get(i);
@@ -442,7 +575,7 @@ public class PlanSegmentService {
                 if (text.length() <= name.length() + 8 && i + 1 < blocks.size()) {
                     detail = text + "\n" + blocks.get(i + 1).text();
                 }
-                mergeActionGroup(groups, name, detail, block.page());
+                mergeActionGroup(groups, name, detail, block.page(), rules);
             }
             Matcher inline = INLINE_GROUPS_PATTERN.matcher(text);
             if (inline.find()) {
@@ -450,7 +583,7 @@ public class PlanSegmentService {
                     String baseName = cleanGroupName(item);
                     String name = baseName.endsWith("组") ? baseName : baseName + "组";
                     if (isUsefulGroupName(name)) {
-                        mergeActionGroup(groups, name, text, block.page());
+                        mergeActionGroup(groups, name, text, block.page(), rules);
                     }
                 }
             }
@@ -458,11 +591,16 @@ public class PlanSegmentService {
         return groups.values().stream().map(MutableActionGroup::toSegment).toList();
     }
 
-    private void mergeActionGroup(Map<String, MutableActionGroup> groups, String name, String detail, int page) {
+    private void mergeActionGroup(
+            Map<String, MutableActionGroup> groups,
+            String name,
+            String detail,
+            int page,
+            SegmentRules rules) {
         String normalizedName = normalizeGroupName(name);
         MutableActionGroup group = groups.computeIfAbsent(
                 normalizedName, ignored -> new MutableActionGroup(actionGroupKey(normalizedName), name));
-        group.add(detail, page);
+        group.add(detail, page, rules);
     }
 
     private String cleanGroupName(String name) {
@@ -493,6 +631,9 @@ public class PlanSegmentService {
         }
     }
 
+    /**
+     * 综合标题、表格、目录排除和上下文证据选择最佳章节候选。
+     */
     private Optional<SegmentSection> findBestSection(
             String key,
             String level,
@@ -833,6 +974,20 @@ public class PlanSegmentService {
             measurePages.addAll(parts.measurePages());
         }
 
+        /** 将包含级别名称的条件正文直接合并到对应级别。 */
+        private void addCondition(DocumentBlock block) {
+            if (title == null) {
+                title = definition.level();
+            }
+            addParagraphs(conditions, block.text());
+            if (block.page() > 0) {
+                conditionPages.add(block.page());
+            }
+            if (evidence.size() < 5 && !evidence.contains(block.text())) {
+                evidence.add(block.text());
+            }
+        }
+
         private LevelDefinition definition() {
             return definition;
         }
@@ -892,10 +1047,6 @@ public class PlanSegmentService {
 
     private final class MutableActionGroup {
 
-        private static final Pattern LEAD_PATTERN = Pattern.compile("由(.{1,100}?)(?:牵头|负责)");
-        private static final Pattern MEMBER_PATTERN = Pattern.compile(
-                "(?:联合|会同|成员包括|牵头[，,])(.{1,160}?)(?:组成|参加|为成员)");
-
         private final String key;
         private final String name;
         private final List<String> leads = new ArrayList<>();
@@ -909,26 +1060,63 @@ public class PlanSegmentService {
             this.name = name;
         }
 
-        private void add(String detail, int page) {
+        private void add(String detail, int page, SegmentRules rules) {
             addParagraphs(raw, detail);
             if (page > 0) {
                 pages.add(page);
             }
-            Matcher lead = LEAD_PATTERN.matcher(detail);
+            List<String> leadMarkers = rules.markerAliases()
+                    .getOrDefault("group_lead", List.of("牵头", "负责"));
+            Pattern leadPattern = Pattern.compile(
+                    "由(.{1,100}?)(?:" + quotedAlternatives(leadMarkers) + ")");
+            Matcher lead = leadPattern.matcher(detail);
             while (lead.find()) {
                 addOrganizations(leads, lead.group(1));
             }
-            Matcher member = MEMBER_PATTERN.matcher(detail);
+            List<String> memberMarkers = rules.markerAliases()
+                    .getOrDefault("group_member", List.of("组成", "参加", "为成员"));
+            Pattern memberPattern = Pattern.compile(
+                    "(?:联合|会同|成员包括|牵头[，,])(.{1,160}?)(?:"
+                            + quotedAlternatives(memberMarkers) + ")");
+            Matcher member = memberPattern.matcher(detail);
             while (member.find()) {
                 addOrganizations(members, member.group(1));
             }
-            int mainResponsibility = detail.lastIndexOf("主要负责");
-            int responsibilityIndex = mainResponsibility >= 0 ? mainResponsibility : detail.lastIndexOf("负责");
+            List<String> responsibilityMarkers = new ArrayList<>(rules.markerAliases()
+                    .getOrDefault("group_responsibility", List.of("主要负责", "负责")));
+            if (!responsibilityMarkers.contains("负责")) {
+                responsibilityMarkers.add("负责");
+            }
+            int responsibilityIndex = responsibilityMarkers.stream()
+                    .mapToInt(detail::lastIndexOf)
+                    .max()
+                    .orElse(-1);
             if (responsibilityIndex >= 0) {
-                String value = detail.substring(responsibilityIndex).trim();
-                if (!responsibilities.contains(value)) {
-                    responsibilities.add(value);
+                addResponsibility(detail.substring(responsibilityIndex));
+            } else {
+                // 有些预案不写“主要负责”，而是“抢救抢险组。组织……；协调……”。
+                // 组名后的动作描述同样是职责，但纯粹的牵头/组成单位说明不在此兜底。
+                int nameIndex = detail.indexOf(name);
+                if (nameIndex >= 0) {
+                    String value = detail.substring(nameIndex + name.length())
+                            .replaceFirst("^[\\s\\r\\n:：。；;、，,]+", "")
+                            .trim();
+                    boolean actionDescription = value.matches(
+                            ".*(组织|承担|协调|指导|调配|搜救|保障|开展|监测|发布|维护|恢复|制定|实施|收集|汇总|处置|抢修|安置|供应).*" );
+                    boolean organizationOnly = value.matches(
+                            "^(由|牵头单位|成员单位).{0,200}(牵头|组成|参加|为成员)[。；;]?$" );
+                    if (actionDescription && !organizationOnly) {
+                        addResponsibility(value);
+                    }
                 }
+            }
+        }
+
+        /** 去重保存非空职责文本。 */
+        private void addResponsibility(String value) {
+            String normalized = value == null ? "" : value.trim();
+            if (StringUtils.hasText(normalized) && !responsibilities.contains(normalized)) {
+                responsibilities.add(normalized);
             }
         }
 
@@ -953,6 +1141,15 @@ public class PlanSegmentService {
                     MatchedBy.CONTEXT_FALLBACK,
                     raw.stream().limit(5).toList());
         }
+    }
+
+    private String quotedAlternatives(List<String> values) {
+        String value = values.stream()
+                .filter(StringUtils::hasText)
+                .map(Pattern::quote)
+                .reduce((left, right) -> left + "|" + right)
+                .orElse("");
+        return StringUtils.hasText(value) ? value : "(?!)";
     }
 
     private record Candidate(int index, String alias, MatchedBy matchedBy, boolean toc) {

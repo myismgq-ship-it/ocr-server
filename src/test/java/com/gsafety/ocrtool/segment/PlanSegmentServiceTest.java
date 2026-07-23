@@ -239,6 +239,73 @@ class PlanSegmentServiceTest {
         });
     }
 
+    @Test
+    void mergesConditionsMeasuresAndActionGroupsAcrossDifferentSections() {
+        SegmentRules defaults = TestSegmentRules.defaults();
+        SegmentRules scopedRules = new SegmentRules(
+                defaults.commandKey(),
+                defaults.commandAliases(),
+                defaults.responseAliases(),
+                defaults.responseKeys(),
+                defaults.warningAliases(),
+                defaults.warningKeys(),
+                java.util.Map.of(
+                        "emergency_scope", List.of("应急响应", "分级响应"),
+                        "action_group_scope", List.of("工作组")),
+                java.util.Map.of(
+                        "activation_condition", List.of("启动条件", "响应条件"),
+                        "response_measure", List.of("响应措施", "响应行动"),
+                        "group_responsibility", List.of("主要负责")),
+                defaults.responseTailHeadings(),
+                "earthquake-regression");
+        PlanSegmentService scopedService = new PlanSegmentService(() -> scopedRules);
+        ParsedDocument document = new ParsedDocument(
+                "天津市地震应急预案.doc",
+                DocumentFileType.DOC,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("2.3 市抗震救灾指挥部工作组", 1, 2),
+                        block("2.3.1 综合协调工作组", 1, 3),
+                        block("负责指挥部日常协调工作。", 1, 0),
+                        block("4.3 应急响应分级", 1, 2),
+                        block("符合特别重大地震灾害判定条件时，建议启动一级应急响应。", 1, 0),
+                        block("符合重大地震灾害判定条件时，建议启动二级应急响应。", 1, 0),
+                        block("符合较大地震灾害判定条件时，建议启动三级应急响应。", 1, 0),
+                        block("5 应急响应", 1, 1),
+                        block("5.2 分级响应", 1, 2),
+                        block("5.2.1 一级应急响应", 1, 3),
+                        block("市抗震救灾指挥部组织开展抢险救援和群众安置。", 1, 0),
+                        block("5.2.2 二级应急响应", 1, 3),
+                        block("市有关部门立即派出工作组赶赴灾区。", 1, 0),
+                        block("5.2.3 三级应急响应", 1, 3),
+                        block("事发地区组织开展先期处置。", 1, 0),
+                        block("5.3 工作组应急响应行动", 1, 2),
+                        block("（1）综合协调组。主要负责信息汇总和综合协调。", 1, 0),
+                        block("（2）抢救抢险组。组织人员搜救，协调开展工程抢险。", 1, 0)),
+                List.of());
+
+        SegmentResult result = scopedService.extract(document);
+
+        assertThat(result.emergencyResponses().get(0).activationConditions()).contains("特别重大地震灾害");
+        assertThat(result.emergencyResponses().get(0).directResponseMeasures()).contains("抢险救援和群众安置");
+        assertThat(result.emergencyResponses().get(1).activationConditions()).contains("重大地震灾害");
+        assertThat(result.emergencyResponses().get(1).directResponseMeasures()).contains("赶赴灾区");
+        assertThat(result.emergencyResponses().get(2).activationConditions()).contains("较大地震灾害");
+        assertThat(result.emergencyResponses().get(2).directResponseMeasures()).contains("先期处置");
+        assertThat(result.actionGroups()).extracting(ActionGroupSegment::name)
+                .contains("综合协调组", "抢救抢险组");
+        assertThat(result.actionGroups().stream()
+                .filter(group -> "综合协调组".equals(group.name()))
+                .findFirst()
+                .orElseThrow()
+                .responsibilities()).contains("信息汇总和综合协调");
+        assertThat(result.actionGroups().stream()
+                .filter(group -> "抢救抢险组".equals(group.name()))
+                .findFirst()
+                .orElseThrow()
+                .responsibilities()).contains("人员搜救", "工程抢险");
+    }
+
     private DocumentBlock block(String text, int page, int headingLevel) {
         return new DocumentBlock(text, page, headingLevel, false, List.of());
     }

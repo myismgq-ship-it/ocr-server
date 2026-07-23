@@ -24,6 +24,9 @@ public class WordDocumentParser implements DocumentParser {
 
     private static final Pattern NUMBERED_HEADING = Pattern.compile(
             "^(第[一二三四五六七八九十]+[章节篇]|[一二三四五六七八九十]+[、.]|\\d+(?:\\.\\d+){0,3}[、.\\s]).{0,80}");
+    /** 阿拉伯数字章节编号，用编号段数还原 DOC 中缺失的标题样式层级。 */
+    private static final Pattern ARABIC_NUMBERED_HEADING = Pattern.compile(
+            "^(\\d+(?:\\.\\d+){0,5})[、.\\s].{0,80}");
 
     @Override
     public boolean supports(DocumentFileType fileType) {
@@ -117,8 +120,14 @@ public class WordDocumentParser implements DocumentParser {
         if (text.matches("^第[一二三四五六七八九十]+[章节篇].*")) {
             return 1;
         }
+        Matcher arabic = ARABIC_NUMBERED_HEADING.matcher(text);
+        if (arabic.matches()) {
+            // 5、5.2、5.2.1 分别对应一级、二级、三级标题。
+            int level = 1 + (int) arabic.group(1).chars().filter(value -> value == '.').count();
+            return clampHeadingLevel(level);
+        }
         if (NUMBERED_HEADING.matcher(text).matches()) {
-            return text.matches("^\\d+\\.\\d+.*") ? 2 : 1;
+            return 1;
         }
         return 0;
     }
