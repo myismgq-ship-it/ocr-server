@@ -1,6 +1,7 @@
 package com.gsafety.ocrtool.plan.task;
 
 import com.gsafety.ocrtool.common.OcrException;
+import com.gsafety.ocrtool.management.PlanAccuracyService;
 import com.gsafety.ocrtool.common.ProcessingMetrics;
 import com.gsafety.ocrtool.document.DocumentFileType;
 import com.gsafety.ocrtool.common.ProcessingProgressListener;
@@ -9,6 +10,7 @@ import com.gsafety.ocrtool.plan.PlanDigitizeService;
 import com.gsafety.ocrtool.response.PlanDigitizeResponse;
 import java.nio.file.Path;
 import java.time.OffsetDateTime;
+import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -31,16 +33,20 @@ public class PlanDigitizeTaskWorker {
     /** 管理上传任务源文件，只有成功持久化结果后才删除。 */
     private final PlanTaskStorageService storageService;
     private final ObjectMapper objectMapper;
+    /** 重跑完成后保存与人工样本的结构覆盖率。*/
+    private final PlanAccuracyService accuracyService;
 
     public PlanDigitizeTaskWorker(
             PlanDigitizeService digitizeService,
             PlanDigitizeTaskRepository repository,
             PlanTaskStorageService storageService,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            PlanAccuracyService accuracyService) {
         this.digitizeService = digitizeService;
         this.repository = repository;
         this.storageService = storageService;
         this.objectMapper = objectMapper;
+        this.accuracyService = accuracyService;
     }
 
     /**
@@ -90,11 +96,9 @@ public class PlanDigitizeTaskWorker {
                 return;
             // 上传源文件在结果成功提交后删除，并随后清空数据库路径，支持补偿重试。
             }
-            if (task.sourceType() == PlanDigitizeTaskSourceType.UPLOAD) {
-                if (storageService.delete(task.sourcePath())) {
-                    repository.clearSourcePath(task.taskId());
-                }
-            }
+            // 成功任务源文件按完成文件保留期保存，供人工复核后的历史回归重跑使用。
+            // 到期清理由调度器统一执行，避免评测期间误删源文件。
+            evaluateReplay(task, json);
             log.info(
                     "预案数字化任务完成，taskId={}, planId={}, durationMs={}",
                     task.taskId(), task.planId(), elapsedMillis(started));
@@ -107,6 +111,16 @@ public class PlanDigitizeTaskWorker {
         }
     }
 
+    @SuppressWarnings("unchecked")
+    private void evaluateReplay(PlanDigitizeTask task, String resultJson) {
+        try {
+            Map<String, Object> actual = objectMapper.readValue(resultJson, Map.class);
+            accuracyService.evaluateReplayIfApplicable(task, actual);
+        } catch (Exception ex) {
+            // 评测记录失败不应回滚已持久化的识别结果；下次重跑仍可再次产生评测。
+            log.warn("预案任务完成后生成准确率评测失败，taskId={}", task.taskId(), ex);
+        }
+    }
     private PlanDigitizeResponse digitizeUpload(
             PlanDigitizeTask task, ProcessingProgressListener progressListener) {
         DownloadedDocument document = new DownloadedDocument(

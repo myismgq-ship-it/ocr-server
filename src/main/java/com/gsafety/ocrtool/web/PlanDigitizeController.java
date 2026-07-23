@@ -119,6 +119,14 @@ public class PlanDigitizeController {
         return ResponseEntity.accepted().body(taskService.retry(planId, taskId));
     }
 
+    /** 使用最新规则重跑已人工复核任务，并在完成后生成结构覆盖率评测。 */
+    @PostMapping("/{planId}/digitize/tasks/{taskId}/replay")
+    public ResponseEntity<PlanDigitizeTaskResponse> replayTask(
+            @PathVariable("planId") String planId,
+            @PathVariable("taskId") UUID taskId) {
+        return ResponseEntity.accepted().body(taskService.replayForEvaluation(planId, taskId));
+    }
+
     /** 取消排队中或运行中的任务。 */
     @PostMapping("/{planId}/digitize/tasks/{taskId}/cancel")
     public PlanDigitizeTaskResponse cancelTask(
