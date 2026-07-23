@@ -223,6 +223,10 @@ class PlanSegmentServiceTest {
         ResponseLevelSegment level2 = result.emergencyResponses().get(1);
         ResponseLevelSegment level3 = result.emergencyResponses().get(2);
         ResponseLevelSegment level4 = result.emergencyResponses().get(3);
+        assertThat(level1.title()).isEqualTo("一级响应");
+        assertThat(level2.title()).isEqualTo("二级响应");
+        assertThat(level1.matchEvidence()).contains("5.3.3 一、二级响应");
+        assertThat(level2.matchEvidence()).contains("5.3.3 一、二级响应");
         assertThat(level1.activationConditions()).contains("一级条件").doesNotContain("抄送", "指导意见");
         assertThat(level2.activationConditions()).contains("二级条件").doesNotContain("指导意见");
         assertThat(level3.activationConditions()).contains("三级条件").doesNotContain("赶赴现场");

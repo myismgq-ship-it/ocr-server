@@ -226,7 +226,10 @@ public class PlanSegmentService {
                 }
                 int end = findLevelWindowEnd(i, blocks, definitions, rules);
                 CandidateParts parts = classifyLevelWindow(category, i, end, blocks, rules);
-                levels.get(definition.key()).add(block, parts);
+                String title = containsGroupedLevelMention(block.text(), definition, definitions)
+                        ? definition.level()
+                        : block.text();
+                levels.get(definition.key()).add(block, parts, title);
             }
         }
         if ("WARNING".equals(category)) {
@@ -956,9 +959,9 @@ public class PlanSegmentService {
             this.definition = definition;
         }
 
-        private void add(DocumentBlock anchor, CandidateParts parts) {
+        private void add(DocumentBlock anchor, CandidateParts parts, String resolvedTitle) {
             if (title == null) {
-                title = anchor.text();
+                title = resolvedTitle;
             }
             if (evidence.size() < 5 && !evidence.contains(anchor.text())) {
                 evidence.add(anchor.text());
