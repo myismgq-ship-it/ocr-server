@@ -96,6 +96,25 @@ public class PlanTaskStorageService {
     }
 
     /**
+     * 取得仍在任务存储根目录内的历史上传源文件。
+     *
+     * <p>该方法只做只读存在性校验，不复制、不移动也不删除文件；规则调试完成后继续由
+     * 已有完成文件保留期统一清理。</p>
+     */
+    public Path requireExistingSource(PlanDigitizeTask source) {
+        Path sourcePath = source.sourcePath() == null
+                ? null
+                : Path.of(source.sourcePath()).toAbsolutePath().normalize();
+        if (sourcePath == null || !sourcePath.startsWith(root) || !Files.isRegularFile(sourcePath)) {
+            throw new OcrException(
+                    HttpStatus.GONE,
+                    "TASK_SOURCE_EXPIRED",
+                    "历史任务源文件已过期，请重新上传文档进行规则调试。"
+            );
+        }
+        return sourcePath;
+    }
+    /**
      * 仅删除任务根目录内的文件；越界路径返回 false。
      */
     public boolean delete(String sourcePath) {

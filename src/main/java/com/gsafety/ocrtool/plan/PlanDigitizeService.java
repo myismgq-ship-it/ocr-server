@@ -100,6 +100,32 @@ public class PlanDigitizeService {
         }
     }
 
+    /**
+     * 使用指定规则快照调试临时上传的样本文档。
+     *
+     * <p>调试结果额外保留解析块和分段中间结果，仅供管理端解释命中过程；上传临时文件在
+     * 请求结束时自动清理，不会写入异步任务和规则版本表。</p>
+     */
+    public PlanDigitizeDebugRun debug(MultipartFile file, SegmentRules rules) {
+        try (DownloadedDocument document = uploadService.upload(file)) {
+            return debugDocument(document, rules);
+        }
+    }
+
+    /** 使用现有 SSRF 防护下载远程文档后执行规则调试。 */
+    public PlanDigitizeDebugRun debug(String documentUrl, SegmentRules rules) {
+        try (DownloadedDocument document = downloadService.download(documentUrl)) {
+            return debugDocument(document, rules);
+        }
+    }
+
+    /** 调试已准备好的文档；调用方负责决定该文档是否为需要保留的任务源文件。 */
+    public PlanDigitizeDebugRun debugDocument(DownloadedDocument document, SegmentRules rules) {
+        ParsedDocument parsedDocument = parseService.parse(document);
+        SegmentResult segmentResult = segmentService.extract(parsedDocument, rules);
+        return new PlanDigitizeDebugRun(
+                toResponse(parsedDocument, segmentResult), parsedDocument, segmentResult);
+    }
     /** 解析已准备好的文档，供异步上传任务复用。 */
     public PlanDigitizeResponse digitizeDocument(DownloadedDocument document) {
         return digitizeDocument(document, ProcessingProgressListener.NOOP);
@@ -135,6 +161,19 @@ public class PlanDigitizeService {
                 : segmentService.extract(parsedDocument, rules);
         long segmentMillis = elapsedMillis(segmentStarted);
         ProcessingMetrics.record("segment", segmentStarted);
+        PlanDigitizeResponse response = toResponse(parsedDocument, segmentResult);
+        listener.onProgress(ProcessingStage.PERSIST, 95);
+        log.info(
+        // PERSIST 表示结构化结果已经准备完毕，真正数据库提交由任务 Worker 完成。
+                "预案数字化完成，fileName={}, parseMode={}, parseMs={}, segmentMs={}, totalMs={}",
+                parsedDocument.fileName(), parsedDocument.parseMode(), parseMillis, segmentMillis,
+                elapsedMillis(totalStarted));
+        ProcessingMetrics.record("total", totalStarted);
+        return response;
+    }
+
+    /** 将内部解析和分段对象映射为稳定的 REST 结构。 */
+    private PlanDigitizeResponse toResponse(ParsedDocument parsedDocument, SegmentResult segmentResult) {
         List<String> warnings = new ArrayList<>();
         warnings.addAll(parsedDocument.warnings());
         warnings.addAll(segmentResult.warnings());
@@ -147,7 +186,7 @@ public class PlanDigitizeService {
         List<ResponseLevelSectionResponse> emergencyResponses = segmentResult.emergencyResponses().stream()
                 .map(this::toResponseLevelSection)
                 .toList();
-        PlanDigitizeResponse response = new PlanDigitizeResponse(
+        return new PlanDigitizeResponse(
                 parsedDocument.fileName(),
                 parsedDocument.fileType().name(),
                 parsedDocument.parseMode().name(),
@@ -160,16 +199,7 @@ public class PlanDigitizeService {
                 segmentResult.actionGroups().stream().map(this::toActionGroup).toList(),
                 List.copyOf(warnings),
                 segmentResult.ruleVersion());
-        listener.onProgress(ProcessingStage.PERSIST, 95);
-        log.info(
-        // PERSIST 表示结构化结果已经准备完毕，真正数据库提交由任务 Worker 完成。
-                "预案数字化完成，fileName={}, parseMode={}, parseMs={}, segmentMs={}, totalMs={}",
-                parsedDocument.fileName(), parsedDocument.parseMode(), parseMillis, segmentMillis,
-                elapsedMillis(totalStarted));
-        ProcessingMetrics.record("total", totalStarted);
-        return response;
     }
-
     private ProcessingProgressListener listener(ProcessingProgressListener progressListener) {
         return progressListener == null ? ProcessingProgressListener.NOOP : progressListener;
     }

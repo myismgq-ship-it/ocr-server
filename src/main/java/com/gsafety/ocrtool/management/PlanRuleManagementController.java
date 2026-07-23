@@ -29,12 +29,16 @@ public class PlanRuleManagementController {
     private final PlanRuleRevisionService service;
     /** 使用隔离规则快照解析样本文档。 */
     private final PlanDigitizeService digitizeService;
+    /** 输出规则候选、命中和回退原因的隔离调试服务。 */
+    private final PlanRuleDebugService debugService;
 
     public PlanRuleManagementController(
             PlanRuleRevisionService service,
-            PlanDigitizeService digitizeService) {
+            PlanDigitizeService digitizeService,
+            PlanRuleDebugService debugService) {
         this.service = service;
         this.digitizeService = digitizeService;
+        this.debugService = debugService;
     }
 
     /** 创建规则草稿。 */
@@ -49,6 +53,11 @@ public class PlanRuleManagementController {
     @GetMapping("/revisions")
     public List<PlanRuleRevisionResponse> history() {
         return service.history();
+    }
+    /** Queries the active database rule rows used by the parser. */
+    @GetMapping("/active")
+    public PlanActiveRuleResponse activeRules() {
+        return debugService.activeRules();
     }
 
     /** 校验规则草稿。 */
@@ -67,6 +76,34 @@ public class PlanRuleManagementController {
         return digitizeService.digitize(file, service.snapshot(revisionId));
     }
 
+    /**
+     * 上传临时样本文档，返回规则候选、命中、回退和淘汰原因；不发布或保存规则。
+     */
+    @PostMapping("/revisions/{revisionId}/debug/file")
+    public PlanRuleDebugResponse debugFile(
+            @PathVariable UUID revisionId,
+            @RequestPart("file") MultipartFile file) {
+        return debugService.debugFile(revisionId, file);
+    }
+
+    /** 使用历史终态任务的来源文档重新调试指定规则版本。 */
+    @PostMapping("/revisions/{revisionId}/debug/task")
+    public PlanRuleDebugResponse debugTask(
+            @PathVariable UUID revisionId,
+            @RequestBody PlanRuleDebugTaskRequest request) {
+        return debugService.debugTask(revisionId, request);
+    }
+    /** Debugs a temporary upload with the current database-active rules. */
+    @PostMapping("/debug/file")
+    public PlanRuleDebugResponse debugActiveFile(@RequestPart("file") MultipartFile file) {
+        return debugService.debugActiveFile(file);
+    }
+
+    /** Debugs a terminal task with the current database-active rules. */
+    @PostMapping("/debug/task")
+    public PlanRuleDebugResponse debugActiveTask(@RequestBody PlanRuleDebugTaskRequest request) {
+        return debugService.debugActiveTask(request);
+    }
     /** 发布规则草稿。 */
     @PostMapping("/revisions/{revisionId}/publish")
     public PlanRuleRevisionResponse publish(@PathVariable UUID revisionId) {
