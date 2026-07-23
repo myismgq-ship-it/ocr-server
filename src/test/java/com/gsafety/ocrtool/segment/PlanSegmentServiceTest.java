@@ -310,6 +310,104 @@ class PlanSegmentServiceTest {
                 .responsibilities()).contains("人员搜救", "工程抢险");
     }
 
+    @Test
+    void extractsSharedConditionsAndMeasuresFromUnstyledActivationHeadings() {
+        ParsedDocument document = new ParsedDocument(
+                "bus-plan.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("5 应急响应", 1, 1),
+                        block("5.1 分级响应", 1, 2),
+                        block("发生特别重大事件时启动一级应急响应；发生重大事件时启动一级或二级应急响应；"
+                                + "发生较大事件时启动三级或四级应急响应。", 1, 0),
+                        block("市指挥部协调措施", 1, 0),
+                        block("启动一级应急响应：", 1, 0),
+                        block("组织一级救援力量赶赴现场。", 1, 0),
+                        block("启动二级应急响应：", 1, 0),
+                        block("组织二级救援力量赶赴现场。", 1, 0),
+                        block("启动三级应急响应：", 1, 0),
+                        block("组织三级救援力量赶赴现场。", 1, 0),
+                        block("启动四级应急响应：", 1, 0),
+                        block("组织四级救援力量赶赴现场。", 1, 0),
+                        block("响应结束", 1, 2)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        assertThat(result.emergencyResponses()).allSatisfy(level -> {
+            assertThat(level.status()).isEqualTo("EXTRACTED");
+            assertThat(level.activationConditions()).contains("发生");
+            assertThat(level.directResponseMeasures()).contains("救援力量赶赴现场");
+        });
+    }
+
+    @Test
+    void extractsNestedCompactNumberedResponseSections() {
+        ParsedDocument document = new ParsedDocument(
+                "natural-disaster-plan.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("五、省级应急响应", 1, 1),
+                        block("5.1一级响应", 1, 2),
+                        block("5.1.1启动条件", 1, 3),
+                        block("发生特别重大灾害时，可启动一级响应。", 1, 0),
+                        block("5.1.3响应措施", 1, 3),
+                        block("组织一级救灾力量开展救助。", 1, 0),
+                        block("5.2二级响应", 1, 2),
+                        block("5.2.1启动条件", 1, 3),
+                        block("发生重大灾害时，可启动二级响应。", 1, 0),
+                        block("5.2.3响应措施", 1, 3),
+                        block("组织二级救灾力量开展救助。", 1, 0),
+                        block("5.3三级响应", 1, 2),
+                        block("5.3.1启动条件", 1, 3),
+                        block("发生较大灾害时，可启动三级响应。", 1, 0),
+                        block("5.3.3响应措施", 1, 3),
+                        block("组织三级救灾力量开展救助。", 1, 0),
+                        block("5.4四级响应", 1, 2),
+                        block("5.4.1启动条件", 1, 3),
+                        block("发生一般灾害时，可启动四级响应。", 1, 0),
+                        block("5.4.3响应措施", 1, 3),
+                        block("组织四级救灾力量开展救助。", 1, 0),
+                        block("5.5启动条件调整", 1, 2)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        assertThat(result.emergencyResponses()).allSatisfy(level -> {
+            assertThat(level.status()).isEqualTo("EXTRACTED");
+            assertThat(level.activationConditions()).contains("灾害");
+            assertThat(level.directResponseMeasures()).contains("救灾力量");
+        });
+    }
+
+    @Test
+    void splitsInlineActivationConditionAndMeasure() {
+        ParsedDocument document = new ParsedDocument(
+                "grain-plan.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("5 分级响应", 1, 1),
+                        block("5.1 一级应急响应", 1, 2),
+                        block("出现特别重大粮食应急状态时，由指挥部启动一级应急响应，"
+                                + "指挥部立即采取措施增加市场供给。", 1, 0),
+                        block("5.2 二级应急响应", 1, 2),
+                        block("出现重大粮食应急状态时，由指挥部启动二级应急响应，"
+                                + "指挥部立即组织成员单位开展处置。", 1, 0),
+                        block("响应终止", 1, 2)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+        ResponseLevelSegment level1 = result.emergencyResponses().get(0);
+        ResponseLevelSegment level2 = result.emergencyResponses().get(1);
+
+        assertThat(level1.activationConditions()).contains("特别重大").doesNotContain("增加市场供给");
+        assertThat(level1.directResponseMeasures()).contains("增加市场供给");
+        assertThat(level2.activationConditions()).contains("重大粮食").doesNotContain("组织成员单位");
+        assertThat(level2.directResponseMeasures()).contains("组织成员单位");
+    }
     private DocumentBlock block(String text, int page, int headingLevel) {
         return new DocumentBlock(text, page, headingLevel, false, List.of());
     }
