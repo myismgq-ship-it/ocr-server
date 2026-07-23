@@ -1,0 +1,60 @@
+{
+  "samples": [
+    {
+      "fileName": "天津市森林火灾应急预案.docx",
+      "sha256": "BE1300020BAFC5FE91A04E8C18215E23E29D1BDAC97DC5E19BE6B70E7CDD6948",
+      "emergencyLevelKeys": ["level_1", "level_2", "level_3", "level_4"],
+      "warningLevelKeys": ["warning_level_1", "warning_level_2", "warning_level_3", "warning_level_4"],
+      "requireCompleteContent": true,
+      "note": "四级预警和四级响应正向回归样本"
+    },
+    {
+      "fileName": "河西区地震应急预案.docx",
+      "sha256": "1D1329FB22EC4FCEDC8AEA9E7CD70C5F42A8E54BA99E11AFB7F013DE4C30DB4B",
+      "emergencyLevelKeys": ["level_1", "level_2", "level_3"],
+      "warningLevelKeys": [],
+      "requireCompleteContent": true,
+      "note": "实际采用三级响应，四级为不适用"
+    },
+    {
+      "fileName": "天津市粮食应急预案.docx",
+      "sha256": "F4602D357B84D7B85E21C6D9EABE49D4C4E7CFD5A598BF14D555F8F99A7BA73D",
+      "emergencyLevelKeys": ["level_1", "level_2", "level_3"],
+      "warningLevelKeys": [],
+      "requireCompleteContent": true,
+      "note": "条件和措施同行书写，实际采用三级响应"
+    },
+    {
+      "fileName": "山西省自然灾害救助应急预案_20250902145800.docx",
+      "sha256": "0A9D93E7E2C03DA46E30010D9059386FCBD6E7D20BDBE0D7808CFE4AD86FBC57",
+      "emergencyLevelKeys": ["level_1", "level_2", "level_3", "level_4"],
+      "warningLevelKeys": [],
+      "requireCompleteContent": true,
+      "note": "紧凑编号标题和启动条件、响应措施子章节"
+    },
+    {
+      "fileName": "天津市城市公共汽电车突发事件应急预案.docx",
+      "sha256": "3E61EE1F854D6670A57ED6515519B875467D419A7AFB4B407499A8E1821BADF9",
+      "emergencyLevelKeys": ["level_1", "level_2", "level_3", "level_4"],
+      "warningLevelKeys": [],
+      "requireCompleteContent": true,
+      "note": "共享条件段落和无标题样式的启动级别短行"
+    },
+    {
+      "fileName": "河北省唐山市交通运输局防汛应急预案.docx",
+      "sha256": "ABD14EEC8C4988A961514C9235D6274688AA70AFB1F98C8D382207E7C1722430",
+      "emergencyLevelKeys": [],
+      "warningLevelKeys": ["warning_level_1", "warning_level_2", "warning_level_3", "warning_level_4"],
+      "requireCompleteContent": false,
+      "note": "以四级预警响应组织内容，暂只校验级别召回"
+    },
+    {
+      "fileName": "河西区教育系统突发公共事件应急预案2020年.doc",
+      "sha256": "57FF8B6E01FFB0C97E0D572A841849F3E6639B56F178172B2C7F6E3915C6BE0B",
+      "emergencyLevelKeys": [],
+      "warningLevelKeys": [],
+      "requireCompleteContent": false,
+      "note": "旧版DOC兼容样本，当前先校验解析成功"
+    }
+  ]
+}

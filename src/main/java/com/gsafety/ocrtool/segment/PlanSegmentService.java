@@ -114,6 +114,7 @@ public class PlanSegmentService {
             String alias = matchingAlias(block.text(), aliases);
             if (alias != null
                     && !isTocBlock(block)
+                    && !isDiagramHeading(block.text())
                     && (block.heading() || block.table())
                     && normalize(block.text()).length() <= normalize(alias).length() + 20) {
                 candidates.add(i);
@@ -143,6 +144,15 @@ public class PlanSegmentService {
         }
         // 只有标题没有正文通常是宽泛别名误命中，继续扫描全文更安全。
         return end > start + 1 ? blocks.subList(start, end) : blocks;
+    }
+
+    /** 流程图、示意图和组织图是附件证据，不能作为章节裁剪入口。 */
+    private boolean isDiagramHeading(String text) {
+        String normalized = normalize(text);
+        return normalized.contains("流程图")
+                || normalized.contains("示意图")
+                || normalized.contains("框架图")
+                || normalized.contains("组织图");
     }
 
     private List<LevelDefinition> levelDefinitions(boolean warning, SegmentRules rules) {
@@ -216,7 +226,9 @@ public class PlanSegmentService {
                 // 预案常把启动条件直接写成“符合……时，启动一级响应”，没有独立的
                 // “一级响应”标题。此类正文是有效条件证据，不能按普通级别引用丢弃。
                 if (isExplicitActivationCondition(block.text())
-                        && contextKind(category, i, blocks, rules) == ContentKind.CONDITION
+                        && (contextKind(category, i, blocks, rules) == ContentKind.CONDITION
+                        || containsMultipleLevelDefinitions(block.text(), definitions))
+                        && !hasNearbyLevelAnchor(i, blocks, definition)
                         && !isResponseLifecycleReference(block.text())) {
                     levels.get(definition.key()).addCondition(block);
                     continue;
@@ -247,7 +259,15 @@ public class PlanSegmentService {
 
     private boolean isPrimaryLevelMention(
             DocumentBlock block, LevelDefinition current, List<LevelDefinition> definitions) {
-        if (looksLikeCondition(block.text()) || isResponseLifecycleReference(block.text())) {
+        if (isResponseLifecycleReference(block.text())) {
+            return false;
+        }
+        // 部分预案不用标题样式，而是以“启动一级应急响应：”作为措施列表入口。
+        // 该短句本身不是条件正文，但必须作为级别窗口锚点，否则后续措施会整体漏掉。
+        if (isLevelActivationHeading(block.text(), current)) {
+            return true;
+        }
+        if (looksLikeCondition(block.text())) {
             return false;
         }
         if (block.heading() || block.table()) {
@@ -258,6 +278,22 @@ public class PlanSegmentService {
         }
         String text = stripSectionNumber(normalize(block.text()));
         return current.aliases().stream().map(this::normalize).anyMatch(text::equals);
+    }
+
+    /**
+     * 判断正文短行是否承担响应级别标题作用。
+     *
+     * <p>只接受长度较短、以启动动词开头且完整包含当前级别别名的文本，
+     * 避免把“启动响应后及时报告”等普通叙述误判为章节入口。</p>
+     */
+    private boolean isLevelActivationHeading(String text, LevelDefinition definition) {
+        String value = stripSectionNumber(normalize(text));
+        if (value.length() > 32 || !value.matches("^(启动|实施|进入|执行).+")) {
+            return false;
+        }
+        return definition.aliases().stream()
+                .map(this::normalize)
+                .anyMatch(alias -> value.matches("^(启动|实施|进入|执行)" + Pattern.quote(alias) + "$"));
     }
 
     private boolean containsGroupedLevelMention(
@@ -292,7 +328,8 @@ public class PlanSegmentService {
             return false;
         }
         String numeral = definition.level().substring(0, 1);
-        Matcher matcher = Pattern.compile("([一二三四](?:[、,，/和及与][一二三四])+)(?:级)?(?:应急)?响应")
+        Matcher matcher = Pattern.compile(
+                        "([一二三四](?:级)?(?:[、,，/和及与或][一二三四](?:级)?)+)(?:应急)?响应")
                 .matcher(normalize(text));
         while (matcher.find()) {
             if (matcher.group(1).contains(numeral)) {
@@ -344,6 +381,37 @@ public class PlanSegmentService {
     }
 
     /**
+     * 判断一段启动条件是否同时覆盖多个响应级别。
+     *
+     * <p>“特别重大启动一级、重大启动二级……”是公共条件段，应分别写入每个命中级别；
+     * 单级普通正文仍由章节上下文决定，避免跨章节吸收条件。</p>
+     */
+    private boolean containsMultipleLevelDefinitions(String text, List<LevelDefinition> definitions) {
+        return definitions.stream().filter(definition -> matchesLevelDefinition(text, definition)).count() > 1;
+    }
+
+    /**
+     * 判断当前正文是否已经属于紧邻的级别标题窗口。
+     *
+     * <p>标题后的“符合三级响应条件时，由指挥长宣布启动……”属于该级响应措施，
+     * 会在窗口分类阶段处理；这里若再次当作独立条件，会造成条件和措施重复。</p>
+     */
+    private boolean hasNearbyLevelAnchor(
+            int index, List<DocumentBlock> blocks, LevelDefinition definition) {
+        for (int i = index - 1; i >= Math.max(0, index - 2); i--) {
+            DocumentBlock candidate = blocks.get(i);
+            if (matchesLevelDefinition(candidate.text(), definition)
+                    && (candidate.heading() || candidate.table() || candidate.text().length() <= 30)) {
+                return true;
+            }
+            if (candidate.heading()) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /**
      * 按数据库 MARKER 规则在一个级别窗口内区分条件和措施。
      */
     private CandidateParts classifyLevelWindow(
@@ -356,6 +424,15 @@ public class PlanSegmentService {
             String text = block.text().trim();
             if (i == start && (block.heading()
                     || text.length() <= 30 && !text.matches(".*[。；;].*"))) {
+                continue;
+            }
+            InlineContentParts inlineParts = splitInlineConditionAndMeasure(block);
+            if (inlineParts != null) {
+                // “出现重大状态时启动二级响应，指挥部立即采取……”在同一段中同时
+                // 包含条件和措施，必须拆开归类，不能把整段只放进其中一个字段。
+                conditions.add(inlineParts.condition());
+                measures.add(inlineParts.measure());
+                kind = ContentKind.MEASURE;
                 continue;
             }
             if (isStructuralMarker(
@@ -375,6 +452,35 @@ public class PlanSegmentService {
             (kind == ContentKind.CONDITION ? conditions : measures).add(block);
         }
         return new CandidateParts(joinText(conditions), joinText(measures), pages(conditions), pages(measures));
+    }
+
+    /** 拆分同一段内连续书写的启动条件和响应措施。 */
+    private InlineContentParts splitInlineConditionAndMeasure(DocumentBlock block) {
+        String text = block.text().trim();
+        Matcher matcher = Pattern.compile(
+                        "^(.{1,600}?(?:启动|实施|进入|发布).{0,30}(?:响应|预警))[，,。；;](.+)$")
+                .matcher(text);
+        if (!matcher.matches() || !isExplicitActivationCondition(matcher.group(1))) {
+            return null;
+        }
+        String conditionText = matcher.group(1).trim();
+        String measureText = matcher.group(2).trim();
+        // “符合三级响应条件时启动三级响应”只是引用其他位置已定义的条件，
+        // 不能把这类响应程序说明误当成条件正文。
+        if (conditionText.matches(".*符合.{0,20}(?:响应|预警)条件时.*")) {
+            return null;
+        }
+        if (!StringUtils.hasText(measureText)) {
+            return null;
+        }
+        return new InlineContentParts(
+                copyBlockWithText(block, conditionText),
+                copyBlockWithText(block, measureText));
+    }
+
+    /** 创建只替换文本的虚拟文档块，保留来源页和表格属性。 */
+    private DocumentBlock copyBlockWithText(DocumentBlock source, String text) {
+        return new DocumentBlock(text, source.page(), source.headingLevel(), source.table(), source.cells());
     }
 
     private ContentKind contextKind(String category, int start, List<DocumentBlock> blocks, SegmentRules rules) {
@@ -931,6 +1037,10 @@ public class PlanSegmentService {
             String measures,
             List<Integer> conditionPages,
             List<Integer> measurePages) {
+    }
+
+    /** 同一原始段落拆出的条件块和措施块。 */
+    private record InlineContentParts(DocumentBlock condition, DocumentBlock measure) {
     }
 
     private enum ContentKind {
