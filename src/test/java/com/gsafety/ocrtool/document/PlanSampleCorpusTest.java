@@ -61,6 +61,8 @@ class PlanSampleCorpusTest {
         }
 
         assertNationalEarthquake(roots);
+        assertHexiEarthquake(roots);
+        assertTianjinForestFire(roots);
         assertTraditionalDoc(roots);
         assertMhtml(roots);
         assertNonPlan(roots);
@@ -76,6 +78,41 @@ class PlanSampleCorpusTest {
                 .contains("特别重大地震灾害");
         assertThat(result.emergencyResponses().get(0).directResponseMeasures())
                 .contains("抗震救灾");
+    }
+
+    private void assertHexiEarthquake(List<Path> roots) throws Exception {
+        Path sample = find(roots, "河西区地震应急预案.docx").orElse(null);
+        if (sample == null) {
+            return;
+        }
+        SegmentResult result = segmenter.extract(parse(sample));
+        assertThat(result.emergencyResponses().subList(0, 3))
+                .allSatisfy(level -> assertThat(level.status()).isNotEqualTo("MISSING"));
+        ResponseLevelSegment level4 = result.emergencyResponses().get(3);
+        assertThat(level4.status())
+                .withFailMessage("不应生成四级响应：%s", level4)
+                .isEqualTo("MISSING");
+        assertThat(level4.activationConditions()).isNull();
+        assertThat(level4.directResponseMeasures()).isNull();
+    }
+
+    private void assertTianjinForestFire(List<Path> roots) throws Exception {
+        Path sample = find(roots, "天津市森林火灾应急预案.docx").orElse(null);
+        if (sample == null) {
+            return;
+        }
+        SegmentResult result = segmenter.extract(parse(sample));
+        assertThat(result.emergencyResponses()).allSatisfy(level -> {
+            assertThat(level.activationConditions()).isNotBlank()
+                    .doesNotContain("森林火灾分级", "主要任务", "组织灭火行动", "按照以下程序");
+            assertThat(level.directResponseMeasures()).isNotBlank();
+        });
+        assertThat(result.emergencyResponses().get(0).activationConditions()).contains("48小时");
+        assertThat(result.emergencyResponses().get(1).activationConditions()).contains("24小时");
+        assertThat(result.emergencyResponses().get(2).activationConditions()).contains("12小时");
+        assertThat(result.emergencyResponses().get(3).activationConditions()).contains("4小时");
+        assertThat(result.commandSystem()).isNotNull();
+        assertThat(result.commandSystem().title()).doesNotContain("框架图");
     }
 
     private void assertTraditionalDoc(List<Path> roots) throws Exception {

@@ -38,6 +38,8 @@ public class PlanSegmentService {
                     + "(?:[、,，/和及与](?:Ⅰ|Ⅱ|Ⅲ|Ⅳ|IV|III|II|I|[一二三四1-4])(?:级)?)+)"
                     + "(?:共[一二三四1-4]级)?(?:应急)?(?:响应|反应)",
             Pattern.CASE_INSENSITIVE);
+    private static final Pattern EXPLICIT_RESPONSE_TARGET_PATTERN = Pattern.compile(
+            "(?:启动|实施|进入|发布).{0,40}?(?:响应|预警)");
     private static final int MAX_LEVEL_WINDOW_BLOCKS = 80;
     private static final int MAX_FIELD_CHARS = 8_000;
 
@@ -226,7 +228,9 @@ public class PlanSegmentService {
             SegmentRules rules,
             List<String> warnings) {
         Map<String, MutableLevel> levels = new LinkedHashMap<>();
+        Map<String, List<DocumentBlock>> classificationFallbacks = new LinkedHashMap<>();
         definitions.forEach(definition -> levels.put(definition.key(), new MutableLevel(definition)));
+        definitions.forEach(definition -> classificationFallbacks.put(definition.key(), new ArrayList<>()));
         for (int i = 0; i < blocks.size(); i++) {
             DocumentBlock block = blocks.get(i);
             if (isTocBlock(block) || isFlowchartContext(i, blocks)) {
@@ -235,21 +239,28 @@ public class PlanSegmentService {
             if (isConditionLevelContinuation(i, blocks)) {
                 continue;
             }
+            boolean explicitActivation = isExplicitActivationCondition(block.text());
+            Set<String> explicitTargets = explicitActivation
+                    ? explicitActivationTargets(block.text(), definitions)
+                    : Set.of();
             for (LevelDefinition definition : definitions) {
                 if (!isCategoryCompatible(category, i, blocks)) {
                     continue;
                 }
                 if (isClassificationCondition(category, i, blocks, definition)) {
                     int end = findClassificationEnd(i, blocks, definitions, rules);
-                    levels.get(definition.key()).addConditionBlocks(blocks.subList(i, end));
+                    classificationFallbacks.get(definition.key()).addAll(blocks.subList(i, end));
                     continue;
                 }
                 if (!matchesLevelDefinition(block.text(), definition)) {
                     continue;
                 }
+                if (!explicitTargets.isEmpty() && !explicitTargets.contains(definition.key())) {
+                    continue;
+                }
                 // 预案常把启动条件直接写成“符合……时，启动一级响应”，没有独立的
                 // “一级响应”标题。此类正文是有效条件证据，不能按普通级别引用丢弃。
-                if (isExplicitActivationCondition(block.text())
+                if (explicitActivation
                         && (contextKind(category, i, blocks, rules) == ContentKind.CONDITION
                         || containsMultipleLevelDefinitions(block.text(), definitions))
                         && !hasNearbyLevelAnchor(i, blocks, definition)
@@ -267,6 +278,10 @@ public class PlanSegmentService {
                         : block.text();
                 levels.get(definition.key()).add(block, parts, title);
             }
+        }
+        for (LevelDefinition definition : definitions) {
+            levels.get(definition.key())
+                    .addClassificationConditionBlocks(classificationFallbacks.get(definition.key()));
         }
         applyCommonMeasures(category, levels, definitions, blocks, rules);
         applyMeasureInheritance(levels, definitions, rules);
@@ -326,7 +341,8 @@ public class PlanSegmentService {
             return false;
         }
         String current = normalize(blocks.get(index).text());
-        if (current.contains("预警") || current.contains("措施") || current.contains("行动")) {
+        if (current.contains("预警") || current.contains("措施") || current.contains("行动")
+                || countSeverityLevels(current) != 1) {
             return false;
         }
         for (int i = index; i >= Math.max(0, index - 10); i--) {
@@ -341,6 +357,25 @@ public class PlanSegmentService {
             }
         }
         return false;
+    }
+
+    private int countSeverityLevels(String text) {
+        String value = normalize(text);
+        int count = 0;
+        if (value.contains("特别重大")) {
+            count++;
+            value = value.replace("特别重大", "");
+        }
+        if (value.contains("重大")) {
+            count++;
+        }
+        if (value.contains("较大")) {
+            count++;
+        }
+        if (value.contains("一般")) {
+            count++;
+        }
+        return count;
     }
 
     private boolean containsSeverity(String text, LevelDefinition definition) {
@@ -588,9 +623,13 @@ public class PlanSegmentService {
      */
     private CandidateParts classifyLevelWindow(
             String category, int start, int end, List<DocumentBlock> blocks, SegmentRules rules) {
-        List<DocumentBlock> conditions = new ArrayList<>();
-        List<DocumentBlock> measures = new ArrayList<>();
-        ContentKind kind = contextKind(category, start, blocks, rules);
+        List<DocumentBlock> structuredConditions = new ArrayList<>();
+        List<DocumentBlock> structuredMeasures = new ArrayList<>();
+        List<DocumentBlock> semanticConditions = new ArrayList<>();
+        List<DocumentBlock> semanticMeasures = new ArrayList<>();
+        ContentDecision decision = contextDecision(category, start, blocks, rules);
+        ContentKind kind = decision.kind();
+        boolean structuredRole = decision.structured();
         for (int i = start; i < end; i++) {
             DocumentBlock block = blocks.get(i);
             String text = block.text().trim();
@@ -602,14 +641,28 @@ public class PlanSegmentService {
             if (inlineParts != null) {
                 // “出现重大状态时启动二级响应，指挥部立即采取……”在同一段中同时
                 // 包含条件和措施，必须拆开归类，不能把整段只放进其中一个字段。
-                conditions.add(inlineParts.condition());
-                measures.add(inlineParts.measure());
+                structuredConditions.add(inlineParts.condition());
+                structuredMeasures.add(inlineParts.measure());
                 kind = ContentKind.MEASURE;
+                structuredRole = true;
+                continue;
+            }
+            if (isStartupProcedureTransition(text)) {
+                kind = ContentKind.MEASURE;
+                structuredRole = true;
+                structuredMeasures.add(block);
+                continue;
+            }
+            if (isConditionReferenceProcedure(text)) {
+                kind = ContentKind.MEASURE;
+                structuredRole = false;
+                semanticMeasures.add(block);
                 continue;
             }
             if (isStructuralMarker(
                     block, text, rules, "activation_condition", List.of("启动条件", "响应条件", "发布条件"))) {
                 kind = ContentKind.CONDITION;
+                structuredRole = true;
             }
             if (isStructuralMarker(
                     block,
@@ -618,16 +671,46 @@ public class PlanSegmentService {
                     "response_measure",
                     List.of("响应措施", "应急措施", "处置措施", "协调措施", "响应行动", "响应程序"))) {
                 kind = ContentKind.MEASURE;
+                structuredRole = true;
                 if (isStandaloneMarker(text)) {
                     continue;
                 }
             }
             if (kind == ContentKind.UNKNOWN) {
                 kind = looksLikeCondition(text) ? ContentKind.CONDITION : ContentKind.MEASURE;
+                structuredRole = false;
             }
-            (kind == ContentKind.CONDITION ? conditions : measures).add(block);
+            List<DocumentBlock> target = switch (kind) {
+                case CONDITION -> structuredRole ? structuredConditions : semanticConditions;
+                case MEASURE -> structuredRole ? structuredMeasures : semanticMeasures;
+                case UNKNOWN -> semanticMeasures;
+            };
+            target.add(block);
         }
-        return new CandidateParts(joinText(conditions), joinText(measures), pages(conditions), pages(measures));
+        return new CandidateParts(
+                joinText(structuredConditions),
+                joinText(structuredMeasures),
+                joinText(semanticConditions),
+                joinText(semanticMeasures),
+                pages(structuredConditions),
+                pages(structuredMeasures),
+                pages(semanticConditions),
+                pages(semanticMeasures));
+    }
+
+    /** “符合条件后按以下程序启动响应”是响应流程入口，不是启动条件正文。 */
+    private boolean isStartupProcedureTransition(String text) {
+        String value = normalize(text);
+        return value.matches(".*(?:按照|按|履行|执行).{0,20}(?:程序|流程).{0,20}"
+                + "(?:启动|实施|进入).{0,20}(?:响应|预警).*")
+                || value.matches(".*(?:启动|响应)(?:程序|流程)[:：]?");
+    }
+
+    /** 引用“某级响应条件”后宣布启动属于响应程序，不是条件定义。 */
+    private boolean isConditionReferenceProcedure(String text) {
+        String value = normalize(text);
+        return value.matches(".*符合.{0,30}(?:响应|预警)条件时.*"
+                + "(?:启动|实施|进入|发布).{0,30}(?:响应|预警).*");
     }
 
     /** 拆分同一段内连续书写的启动条件和响应措施。 */
@@ -660,15 +743,29 @@ public class PlanSegmentService {
     }
 
     private ContentKind contextKind(String category, int start, List<DocumentBlock> blocks, SegmentRules rules) {
+        return contextDecision(category, start, blocks, rules).kind();
+    }
+
+    private ContentDecision contextDecision(
+            String category, int start, List<DocumentBlock> blocks, SegmentRules rules) {
         DocumentBlock anchorBlock = blocks.get(start);
         String anchor = anchorBlock.text();
-        // “5.2.1 一级应急响应”是明确的响应措施入口，应优先于更早的
-        // “4.3 应急响应分级”条件上下文，避免跨主章节错误继承内容类型。
+        if (isStructuralMarker(
+                anchorBlock, anchor, rules, "activation_condition",
+                List.of("启动条件", "响应条件", "发布条件"))) {
+            return new ContentDecision(ContentKind.CONDITION, true);
+        }
+        if (isStructuralMarker(
+                anchorBlock, anchor, rules, "response_measure",
+                List.of("响应措施", "应急措施", "处置措施", "响应行动", "协调措施", "响应程序"))) {
+            return new ContentDecision(ContentKind.MEASURE, true);
+        }
+        // 普通等级标题只能确定所属等级，不能直接确定正文属于条件还是措施。
         if (!anchorBlock.table()
                 && anchorBlock.heading()
                 && !anchor.contains("条件")
                 && normalize(anchor).matches("^\\d+(?:\\.\\d+){1,4}.*响应.*")) {
-            return ContentKind.MEASURE;
+            return new ContentDecision(ContentKind.UNKNOWN, false);
         }
         for (int i = start; i >= Math.max(0, start - 12); i--) {
             DocumentBlock block = blocks.get(i);
@@ -685,16 +782,18 @@ public class PlanSegmentService {
                     "response_measure",
                     List.of("响应措施", "应急措施", "处置措施", "响应行动", "协调措施"));
             if (condition != measure) {
-                return condition ? ContentKind.CONDITION : ContentKind.MEASURE;
+                return new ContentDecision(
+                        condition ? ContentKind.CONDITION : ContentKind.MEASURE,
+                        true);
             }
         }
         if ("WARNING".equals(category) && anchor.contains("预警") && !anchor.contains("响应")) {
-            return ContentKind.CONDITION;
+            return new ContentDecision(ContentKind.CONDITION, false);
         }
         if (anchor.matches(".*(启动|实施).{0,12}(响应|预警响应).*")) {
-            return ContentKind.MEASURE;
+            return new ContentDecision(ContentKind.MEASURE, false);
         }
-        return ContentKind.UNKNOWN;
+        return new ContentDecision(ContentKind.UNKNOWN, false);
     }
 
     private boolean isStructuralMarker(
@@ -745,6 +844,20 @@ public class PlanSegmentService {
     private boolean isExplicitActivationCondition(String text) {
         return text.matches(".*(发生|预计|达到|符合|出现|超过|低于|造成|可能发生|不能控|无法控).*")
                 && text.matches(".*(启动|实施|进入|发布).{0,30}(响应|预警).*");
+    }
+
+    /** 优先使用“启动/进入某级响应”中的目标等级，排除“在其他级响应基础上”等来源引用。 */
+    private Set<String> explicitActivationTargets(String text, List<LevelDefinition> definitions) {
+        Set<String> targets = new LinkedHashSet<>();
+        Matcher matcher = EXPLICIT_RESPONSE_TARGET_PATTERN.matcher(normalize(text));
+        while (matcher.find()) {
+            for (LevelDefinition definition : definitions) {
+                if (matchesLevelDefinition(matcher.group(), definition)) {
+                    targets.add(definition.key());
+                }
+            }
+        }
+        return Set.copyOf(targets);
     }
 
     private boolean isResponseLifecycleReference(String text) {
@@ -1010,6 +1123,9 @@ public class PlanSegmentService {
         List<Candidate> candidates = new ArrayList<>();
         for (int i = 0; i < blocks.size(); i++) {
             DocumentBlock block = blocks.get(i);
+            if (isDiagramHeading(block.text())) {
+                continue;
+            }
             String alias = matchingAlias(block.text(), aliases);
             if (alias == null) {
                 continue;
@@ -1096,7 +1212,8 @@ public class PlanSegmentService {
         for (int i = 0; i < blocks.size(); i++) {
             DocumentBlock block = blocks.get(i);
             String alias = matchingAlias(block.text(), aliases);
-            if (alias == null || isTocBlock(block) || block.text().length() < 30) {
+            if (alias == null || isTocBlock(block) || isDiagramHeading(block.text())
+                    || block.text().length() < 30) {
                 continue;
             }
             int end = Math.min(blocks.size(), i + 4);
@@ -1323,10 +1440,14 @@ public class PlanSegmentService {
     }
 
     private record CandidateParts(
-            String conditions,
-            String measures,
-            List<Integer> conditionPages,
-            List<Integer> measurePages) {
+            String structuredConditions,
+            String structuredMeasures,
+            String semanticConditions,
+            String semanticMeasures,
+            List<Integer> structuredConditionPages,
+            List<Integer> structuredMeasurePages,
+            List<Integer> semanticConditionPages,
+            List<Integer> semanticMeasurePages) {
     }
 
     /** 同一原始段落拆出的条件块和措施块。 */
@@ -1339,15 +1460,25 @@ public class PlanSegmentService {
         MEASURE
     }
 
+    private record ContentDecision(ContentKind kind, boolean structured) {
+    }
+
     private final class MutableLevel {
 
         private final LevelDefinition definition;
-        private final List<String> conditions = new ArrayList<>();
-        private final List<String> measures = new ArrayList<>();
-        private final Set<Integer> conditionPages = new LinkedHashSet<>();
-        private final Set<Integer> measurePages = new LinkedHashSet<>();
+        private final List<String> structuredConditions = new ArrayList<>();
+        private final List<String> semanticConditions = new ArrayList<>();
+        private final List<String> classificationConditions = new ArrayList<>();
+        private final List<String> structuredMeasures = new ArrayList<>();
+        private final List<String> semanticMeasures = new ArrayList<>();
+        private final Set<Integer> structuredConditionPages = new LinkedHashSet<>();
+        private final Set<Integer> semanticConditionPages = new LinkedHashSet<>();
+        private final Set<Integer> classificationConditionPages = new LinkedHashSet<>();
+        private final Set<Integer> structuredMeasurePages = new LinkedHashSet<>();
+        private final Set<Integer> semanticMeasurePages = new LinkedHashSet<>();
         private final List<String> evidence = new ArrayList<>();
         private final List<String> inheritedFrom = new ArrayList<>();
+        private boolean levelEvidenceDetected;
         private MatchedBy matchedBy = MatchedBy.CONTEXT_FALLBACK;
         private String title;
         private String effectiveMeasures;
@@ -1357,6 +1488,7 @@ public class PlanSegmentService {
         }
 
         private void add(DocumentBlock anchor, CandidateParts parts, String resolvedTitle) {
+            levelEvidenceDetected = true;
             if (title == null) {
                 title = resolvedTitle;
             }
@@ -1368,35 +1500,41 @@ public class PlanSegmentService {
             } else if (anchor.heading()) {
                 matchedBy = MatchedBy.HEADING_ALIAS;
             }
-            addParagraphs(conditions, parts.conditions());
-            addParagraphs(measures, parts.measures());
-            conditionPages.addAll(parts.conditionPages());
-            measurePages.addAll(parts.measurePages());
+            addParagraphs(structuredConditions, parts.structuredConditions());
+            addParagraphs(structuredMeasures, parts.structuredMeasures());
+            addParagraphs(semanticConditions, parts.semanticConditions());
+            addParagraphs(semanticMeasures, parts.semanticMeasures());
+            structuredConditionPages.addAll(parts.structuredConditionPages());
+            structuredMeasurePages.addAll(parts.structuredMeasurePages());
+            semanticConditionPages.addAll(parts.semanticConditionPages());
+            semanticMeasurePages.addAll(parts.semanticMeasurePages());
         }
 
         /** 将包含级别名称的条件正文直接合并到对应级别。 */
         private void addCondition(DocumentBlock block) {
+            levelEvidenceDetected = true;
             if (title == null) {
                 title = definition.level();
             }
-            addParagraphs(conditions, block.text());
+            addParagraphs(structuredConditions, block.text());
             if (block.page() > 0) {
-                conditionPages.add(block.page());
+                structuredConditionPages.add(block.page());
             }
             if (evidence.size() < 5 && !evidence.contains(block.text())) {
                 evidence.add(block.text());
             }
         }
 
-        private void addConditionBlocks(List<DocumentBlock> blocks) {
-            if (blocks.isEmpty()) {
+        private void addClassificationConditionBlocks(List<DocumentBlock> blocks) {
+            // 事件/灾害分级只能补充已确认存在的响应等级，不能凭“一般灾害”等级硬造四级响应。
+            if (!levelEvidenceDetected || blocks.isEmpty()) {
                 return;
             }
             if (title == null) {
                 title = definition.level();
             }
-            addParagraphs(conditions, joinText(blocks));
-            conditionPages.addAll(pages(blocks));
+            addParagraphs(classificationConditions, joinText(blocks));
+            classificationConditionPages.addAll(pages(blocks));
             String first = blocks.get(0).text();
             if (evidence.size() < 5 && !evidence.contains(first)) {
                 evidence.add(first);
@@ -1404,15 +1542,16 @@ public class PlanSegmentService {
         }
 
         private void addSharedMeasures(List<DocumentBlock> blocks, String marker) {
-            addParagraphs(measures, joinText(blocks));
-            measurePages.addAll(pages(blocks));
+            // 公共措施标题是明确证据，但将其分配给每个等级仍属于语义推断。
+            addParagraphs(semanticMeasures, joinText(blocks));
+            semanticMeasurePages.addAll(pages(blocks));
             if (evidence.size() < 5 && !evidence.contains(marker)) {
                 evidence.add(marker);
             }
         }
 
         private boolean hasContent() {
-            return !conditions.isEmpty() || !measures.isEmpty();
+            return !selectedConditions().isEmpty() || !selectedMeasures().isEmpty();
         }
 
         private LevelDefinition definition() {
@@ -1420,7 +1559,36 @@ public class PlanSegmentService {
         }
 
         private String directMeasures() {
-            return measures.isEmpty() ? null : String.join("\n", measures);
+            List<String> selected = selectedMeasures();
+            return selected.isEmpty() ? null : String.join("\n", selected);
+        }
+
+        private List<String> selectedConditions() {
+            if (!structuredConditions.isEmpty()) {
+                return structuredConditions;
+            }
+            if (!semanticConditions.isEmpty()) {
+                return semanticConditions;
+            }
+            return classificationConditions;
+        }
+
+        private List<String> selectedMeasures() {
+            return structuredMeasures.isEmpty() ? semanticMeasures : structuredMeasures;
+        }
+
+        private Set<Integer> selectedConditionPages() {
+            if (!structuredConditions.isEmpty()) {
+                return structuredConditionPages;
+            }
+            if (!semanticConditions.isEmpty()) {
+                return semanticConditionPages;
+            }
+            return classificationConditionPages;
+        }
+
+        private Set<Integer> selectedMeasurePages() {
+            return structuredMeasures.isEmpty() ? semanticMeasurePages : structuredMeasurePages;
         }
 
         private String effectiveMeasures() {
@@ -1442,7 +1610,10 @@ public class PlanSegmentService {
         }
 
         private ResponseLevelSegment toSegment() {
-            String activationConditions = conditions.isEmpty() ? null : String.join("\n", conditions);
+            List<String> selectedConditions = selectedConditions();
+            String activationConditions = selectedConditions.isEmpty()
+                    ? null
+                    : String.join("\n", selectedConditions);
             String direct = directMeasures();
             String effective = effectiveMeasures != null ? effectiveMeasures : direct;
             String status;
@@ -1465,8 +1636,8 @@ public class PlanSegmentService {
                     direct,
                     effective,
                     List.copyOf(inheritedFrom),
-                    List.copyOf(conditionPages),
-                    List.copyOf(measurePages),
+                    List.copyOf(selectedConditionPages()),
+                    List.copyOf(selectedMeasurePages()),
                     matchedBy,
                     List.copyOf(evidence));
         }

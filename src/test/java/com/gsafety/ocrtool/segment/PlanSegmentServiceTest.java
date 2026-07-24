@@ -518,6 +518,152 @@ class PlanSegmentServiceTest {
     }
 
     @Test
+    void classificationDoesNotInventLevelsAbsentFromResponseStructure() {
+        ParsedDocument document = new ParsedDocument(
+                "three-level-plan.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("1.3 灾害分级", 1, 2),
+                        block("1.3.1 特别重大灾害", 1, 3),
+                        block("造成三十人以上死亡。", 1, 0),
+                        block("1.3.2 重大灾害", 1, 3),
+                        block("造成十人以上死亡。", 1, 0),
+                        block("1.3.3 较大灾害", 1, 3),
+                        block("造成三人以上死亡。", 1, 0),
+                        block("1.3.4 一般灾害", 1, 3),
+                        block("造成三人以下死亡。", 1, 0),
+                        block("4 应急响应", 2, 1),
+                        block("4.1 Ⅰ级响应行动", 2, 2),
+                        block("组织一级救援力量开展处置。", 2, 0),
+                        block("4.2 Ⅱ级响应行动", 2, 2),
+                        block("组织二级救援力量开展处置。", 2, 0),
+                        block("4.3 Ⅲ级响应行动", 2, 2),
+                        block("组织三级救援力量开展处置。", 2, 0),
+                        block("4.4 工作组应急响应行动", 2, 2),
+                        block("各工作组按照职责开展共同处置。", 2, 0),
+                        block("响应终止", 3, 1)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        assertThat(result.emergencyResponses().subList(0, 3))
+                .allSatisfy(level -> assertThat(level.status()).isEqualTo("EXTRACTED"));
+        ResponseLevelSegment level4 = result.emergencyResponses().get(3);
+        assertThat(level4.status()).isEqualTo("MISSING");
+        assertThat(level4.activationConditions()).isNull();
+        assertThat(level4.directResponseMeasures()).isNull();
+    }
+
+    @Test
+    void usesSemanticEvidenceOnlyForFieldsMissingFromStructuredSections() {
+        ParsedDocument document = new ParsedDocument(
+                "tiered-extraction-plan.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("1.3 事故分级", 1, 2),
+                        block("1.3.1 特别重大事故", 1, 3),
+                        block("造成三十人以上死亡或者一百人以上重伤。", 1, 0),
+                        block("5 应急响应", 2, 1),
+                        block("5.1 Ⅰ级响应", 2, 2),
+                        block("5.1.1 启动条件", 2, 3),
+                        block("监测指标连续超过一级启动阈值。", 2, 0),
+                        block("5.2 Ⅰ级响应", 3, 2),
+                        block("市指挥部组织国家级救援力量赶赴现场。", 3, 0),
+                        block("响应终止", 4, 1)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+        ResponseLevelSegment level1 = result.emergencyResponses().get(0);
+
+        assertThat(level1.activationConditions())
+                .contains("连续超过一级启动阈值")
+                .doesNotContain("三十人以上死亡");
+        assertThat(level1.directResponseMeasures()).contains("国家级救援力量赶赴现场");
+        assertThat(level1.status()).isEqualTo("EXTRACTED");
+    }
+
+    @Test
+    void prefersExplicitForestFireConditionsOverGeneralClassification() {
+        ParsedDocument document = new ParsedDocument(
+                "forest-fire-plan.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("1.3 森林火灾分级", 1, 2),
+                        block("森林火灾分为特别重大、重大、较大和一般四个等级。", 1, 0),
+                        block("1.3.1 特别重大森林火灾", 1, 3),
+                        block("受害森林面积在1000公顷以上。", 1, 0),
+                        block("1.3.2 重大森林火灾", 1, 3),
+                        block("受害森林面积在100公顷以上。", 1, 0),
+                        block("4 主要任务", 2, 1),
+                        block("4.1 组织灭火行动", 2, 2),
+                        block("科学组织扑救，严防次生灾害。", 2, 0),
+                        block("5 应急响应", 3, 1),
+                        block("5.1 Ⅳ级响应", 3, 2),
+                        block("5.1.1 启动条件", 3, 3),
+                        block("初判发生一般森林火灾。", 3, 0),
+                        block("符合上述条件之一时，按照以下程序启动响应：", 3, 0),
+                        block("市森防办提出启动Ⅳ级响应建议。", 3, 0),
+                        block("5.1.2 响应措施", 3, 3),
+                        block("组织属地扑救力量开展处置。", 3, 0),
+                        block("5.2 Ⅲ级响应", 4, 2),
+                        block("5.2.1 启动条件", 4, 3),
+                        block("初判发生较大森林火灾。", 4, 0),
+                        block("5.2.2 响应措施", 4, 3),
+                        block("组织市级扑救力量开展处置。", 4, 0),
+                        block("5.3 Ⅱ级响应", 5, 2),
+                        block("5.3.1 启动条件", 5, 3),
+                        block("初判发生重大森林火灾。", 5, 0),
+                        block("5.3.2 响应措施", 5, 3),
+                        block("组织省级扑救力量开展处置。", 5, 0),
+                        block("5.4 Ⅰ级响应", 6, 2),
+                        block("5.4.1 启动条件", 6, 3),
+                        block("初判发生特别重大森林火灾。", 6, 0),
+                        block("在Ⅱ级应急响应基础上，经市指挥部办公室分析评估，认定灾情达到启动标准，"
+                                + "向市指挥部提出启动Ⅰ级应急响应建议；", 6, 0),
+                        block("5.4.2 响应措施", 6, 3),
+                        block("组织国家级扑救力量开展处置。", 6, 0),
+                        block("响应终止", 7, 1)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        assertThat(result.emergencyResponses()).allSatisfy(level ->
+                assertThat(level.activationConditions())
+                        .doesNotContain("受害森林面积", "主要任务", "组织灭火行动", "按照以下程序"));
+        assertThat(result.emergencyResponses().get(0).activationConditions()).contains("特别重大森林火灾");
+        assertThat(result.emergencyResponses().get(0).activationConditions()).contains("启动Ⅰ级应急响应建议");
+        assertThat(result.emergencyResponses().get(1).activationConditions())
+                .contains("重大森林火灾")
+                .doesNotContain("启动Ⅰ级应急响应建议");
+        assertThat(result.emergencyResponses().get(2).activationConditions()).contains("较大森林火灾");
+        assertThat(result.emergencyResponses().get(3).activationConditions()).contains("一般森林火灾");
+        assertThat(result.emergencyResponses().get(3).directResponseMeasures())
+                .contains("按照以下程序启动响应", "组织属地扑救力量");
+    }
+
+    @Test
+    void ignoresCommandSystemDiagramsInAttachments() {
+        ParsedDocument document = new ParsedDocument(
+                "diagram-attachment.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("2 指挥体系", 2, 1),
+                        block("市森林防灭火指挥部负责统一组织协调。", 2, 0),
+                        block("3 应急响应", 3, 1),
+                        block("附件：天津市森林防灭火指挥部组织体系框架图", 20, 1)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        assertThat(result.commandSystem().title()).isEqualTo("2 指挥体系");
+        assertThat(result.commandSystem().content()).contains("统一组织协调").doesNotContain("框架图");
+    }
+
+    @Test
     void keepsWarningColorsOutOfEmergencyResponses() {
         ParsedDocument document = new ParsedDocument(
                 "warning-only.docx",

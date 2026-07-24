@@ -98,6 +98,13 @@ class PlanAccuracySampleTest {
                         .isNotBlank();
             }
         }
+        if (requireCompleteContent) {
+            actual.stream()
+                    .filter(level -> !expectedKeys.contains(level.key()))
+                    .forEach(level -> assertThat(level.status())
+                            .as(category + " 不适用级别 " + level.key())
+                            .isEqualTo("MISSING"));
+        }
     }
 
     private String firstNonBlank(String first, String second) {
