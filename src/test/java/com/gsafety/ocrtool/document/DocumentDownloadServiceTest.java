@@ -22,6 +22,18 @@ class DocumentDownloadServiceTest {
     Path tempDir;
 
     @Test
+    void detectsWordMhtmlByMimeHeadersInsteadOfDocExtension() throws Exception {
+        Path path = tempDir.resolve("web-archive.doc");
+        Files.writeString(path, "MIME-Version: 1.0\r\n"
+                + "Content-Type: multipart/related; boundary=abc\r\n\r\n"
+                + "--abc--\r\n", StandardCharsets.ISO_8859_1);
+        DocumentDownloadService service = new DocumentDownloadService(new PlanProperties());
+
+        assertThat(service.detectFileType(path, path.getFileName().toString(), "application/msword"))
+                .isEqualTo(DocumentFileType.MHTML);
+    }
+
+    @Test
     void blocksIpv4AndIpv6PrivateTargets() throws Exception {
         for (String address : List.of(
                 "0.0.0.0",

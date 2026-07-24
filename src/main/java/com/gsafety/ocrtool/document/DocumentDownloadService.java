@@ -278,7 +278,7 @@ public class DocumentDownloadService {
     }
 
     DocumentFileType detectFileType(Path path, String fileName, String contentType) throws IOException {
-        byte[] header = readHeader(path, 8);
+        byte[] header = readHeader(path, 8192);
         if (startsWith(header, "%PDF".getBytes(java.nio.charset.StandardCharsets.US_ASCII))) {
             return DocumentFileType.PDF;
         }
@@ -301,10 +301,25 @@ public class DocumentDownloadService {
                 && (header[3] & 0xff) == 0xe0) {
             return DocumentFileType.DOC;
         }
+        if (isMhtml(header)) {
+            return DocumentFileType.MHTML;
+        }
         throw new OcrException(
                 HttpStatus.BAD_REQUEST,
                 "UNSUPPORTED_DOCUMENT_TYPE",
                 "文件真实内容不是受支持的 Word 或 PDF 文档。");
+    }
+
+    private boolean isMhtml(byte[] header) {
+        String value = new String(header, java.nio.charset.StandardCharsets.ISO_8859_1)
+                .replace("\r\n", "\n")
+                .toLowerCase(Locale.ROOT);
+        int headerEnd = value.indexOf("\n\n");
+        String mimeHeaders = headerEnd >= 0 ? value.substring(0, headerEnd) : value;
+        return mimeHeaders.contains("mime-version:")
+                && mimeHeaders.contains("content-type:")
+                && mimeHeaders.contains("multipart/related")
+                && mimeHeaders.contains("boundary=");
     }
 
     private boolean isDocxPackage(Path path) {

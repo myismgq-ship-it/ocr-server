@@ -84,7 +84,7 @@ COMMENT ON TABLE plan_digitize_task IS '预案数字化异步任务';
 COMMENT ON COLUMN plan_digitize_task.task_id IS '任务主键';
 COMMENT ON COLUMN plan_digitize_task.plan_id IS '外部预案业务ID，不设置预案主表外键';
 COMMENT ON COLUMN plan_digitize_task.source_type IS '文档来源类型：UPLOAD上传、URL远程地址';
-COMMENT ON COLUMN plan_digitize_task.file_type IS '识别后的文档类型，如PDF、DOC、DOCX';
+COMMENT ON COLUMN plan_digitize_task.file_type IS '识别后的文档类型，如PDF、DOC、DOCX、MHTML';
 COMMENT ON COLUMN plan_digitize_task.file_name IS '源文档文件名';
 COMMENT ON COLUMN plan_digitize_task.content_type IS '源文档MIME类型';
 COMMENT ON COLUMN plan_digitize_task.file_size IS '源文档字节数';

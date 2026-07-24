@@ -9,7 +9,7 @@
 - 单张图片识别：返回完整文本、文本块坐标、平均置信度、图片尺寸、预处理步骤和告警信息。
 - 批量图片识别：同步处理多张图片，单张失败不会影响其他图片。
 - 模板字段抽取：按 `application.yml` 中的 `ocr.templates` 配置抽取结构化字段。
-- 预案数字化：从 Word/PDF 提取指挥体系、四级预警、四级应急响应和行动组。
+- 预案数字化：从 Word/PDF 提取指挥体系、四级预警、四级应急响应和行动组，并兼容 Word 生成的 MHTML `.doc` 网页归档。
 - 异步任务：按预案 ID 后台解析文档，支持状态查询、阶段进度、历史记录、失败重试、取消和结果过期。
 - 图片预处理：使用 Bytedeco OpenCV 做灰度化、轻量去噪、对比度增强、小图放大和轻微倾斜矫正。
 - 混合 PDF：逐页判断文本质量，仅对扫描页执行预处理和 OCR，结果模式为 `HYBRID`。
@@ -149,7 +149,7 @@ plan:
 - `SPRING_DATASOURCE_USERNAME`
 - `SPRING_DATASOURCE_PASSWORD`
 
-旧环境仍可用 `src/main/resources/db/postgresql/migration/upgrade_plan_digitize_v2.sql` 做一次性升级；完成后应由 Flyway 接管后续版本。V2 迁移增加模板/规则修订和人工复核审计表；V4 新增带完整中文注释的 `plan_catalog` 预案目录表，并从已有任务安全回填基础目录；V5 增加“Ⅰ/Ⅱ/Ⅲ/Ⅳ级应急响应”规则别名。规则默认缓存一分钟，每份文档只读取一次不可变规则快照，结果中的 `ruleVersion` 用于复现。
+旧环境仍可用 `src/main/resources/db/postgresql/migration/upgrade_plan_digitize_v2.sql` 做一次性升级；完成后应由 Flyway 接管后续版本。V2 迁移增加模板/规则修订和人工复核审计表，V4 新增预案目录表，V5 增加准确率样本表，V6 增加罗马数字响应别名，V7 增加多格式预案兼容规则。若历史库曾以 `roman_emergency_response_aliases` 作为 V5 执行，先运行 `db/postgresql/repair_v5_roman_history.sql`，再执行 Flyway repair 和后续迁移。规则默认缓存一分钟，每份文档只读取一次不可变规则快照，结果中的 `ruleVersion` 用于复现。
 
 URL 下载默认拒绝回环、私网、链路本地、组播、CGNAT 地址和非法端口，并会对每次重定向重新验证。生产环境必须设置 `PLAN_DOCUMENT_ALLOWED_HOSTS` 为逗号分隔的业务域名白名单；不要把服务端口直接暴露到网关之外。
 

@@ -451,6 +451,157 @@ class PlanSegmentServiceTest {
         });
     }
 
+    @Test
+    void recognizesDomainWordsReverseLevelsAndLegacyReactionTerms() {
+        ParsedDocument document = new ParsedDocument(
+                "legacy-plan.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("4 应急响应", 1, 1),
+                        block("4.1 Ⅰ级停电事件响应", 1, 2),
+                        block("启动条件", 1, 3),
+                        block("出现特别重大停电事件。", 1, 0),
+                        block("响应行动", 1, 3),
+                        block("组织一级抢修。", 1, 0),
+                        block("4.2 应急响应（Ⅱ级）", 1, 2),
+                        block("启动条件", 1, 3),
+                        block("出现重大停电事件。", 1, 0),
+                        block("响应措施", 1, 3),
+                        block("组织二级抢修。", 1, 0),
+                        block("4.3 Ⅲ级应急反应", 1, 2),
+                        block("启动条件", 1, 3),
+                        block("出现较大停电事件。", 1, 0),
+                        block("反应行动", 1, 3),
+                        block("组织三级抢修。", 1, 0),
+                        block("响应终止", 1, 1)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        assertThat(result.emergencyResponses().subList(0, 3))
+                .allSatisfy(level -> assertThat(level.status()).isEqualTo("EXTRACTED"));
+        assertThat(result.emergencyResponses().get(0).title()).contains("停电事件响应");
+        assertThat(result.emergencyResponses().get(1).title()).contains("Ⅱ级");
+        assertThat(result.emergencyResponses().get(2).title()).contains("应急反应");
+        assertThat(result.emergencyResponses().get(3).status()).isEqualTo("MISSING");
+    }
+
+    @Test
+    void mapsEventClassificationToConditionsAndKeepsResponseActionsAsMeasures() {
+        ParsedDocument document = new ParsedDocument(
+                "classification-plan.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("1.3 事故分级", 1, 2),
+                        block("1.3.1 特别重大事故", 1, 3),
+                        block("造成三十人以上死亡或者一百人以上重伤。", 1, 0),
+                        block("1.3.2 重大事故", 1, 3),
+                        block("造成十人以上死亡或者五十人以上重伤。", 1, 0),
+                        block("4 应急响应", 1, 1),
+                        block("4.1 Ⅰ级响应行动", 1, 2),
+                        block("国务院有关部门组织开展现场救援。", 1, 0),
+                        block("4.2 Ⅱ级响应行动", 1, 2),
+                        block("省级有关部门组织开展现场救援。", 1, 0),
+                        block("响应终止", 1, 1)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        assertThat(result.emergencyResponses().get(0).activationConditions()).contains("三十人以上死亡");
+        assertThat(result.emergencyResponses().get(0).directResponseMeasures()).contains("国务院有关部门");
+        assertThat(result.emergencyResponses().get(1).activationConditions()).contains("十人以上死亡");
+        assertThat(result.emergencyResponses().get(1).directResponseMeasures()).contains("省级有关部门");
+        assertThat(result.emergencyResponses().get(2).status()).isEqualTo("MISSING");
+        assertThat(result.emergencyResponses().get(3).status()).isEqualTo("MISSING");
+    }
+
+    @Test
+    void keepsWarningColorsOutOfEmergencyResponses() {
+        ParsedDocument document = new ParsedDocument(
+                "warning-only.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("3 监测预警", 1, 1),
+                        block("3.1 红色预警", 1, 2),
+                        block("预计发生特别严重灾害。", 1, 0),
+                        block("3.2 橙色预警", 1, 2),
+                        block("预计发生严重灾害。", 1, 0),
+                        block("附则", 1, 1)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        assertThat(result.warningResponses().get(0).status()).isNotEqualTo("MISSING");
+        assertThat(result.emergencyResponses()).allSatisfy(level -> assertThat(level.status()).isEqualTo("MISSING"));
+    }
+
+    @Test
+    void distributesCommonResponseProcedureOnlyToDetectedLevels() {
+        ParsedDocument document = new ParsedDocument(
+                "common-procedure.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("4 应急响应", 1, 1),
+                        block("4.1 响应程序", 1, 2),
+                        block("指挥部统一组织信息报告并协调救援力量。", 1, 0),
+                        block("4.2.1 Ⅰ级响应", 1, 3),
+                        block("出现特别重大事故时启动Ⅰ级响应。", 1, 0),
+                        block("组织国家级救援力量。", 1, 0),
+                        block("4.2.2 Ⅱ级响应", 1, 3),
+                        block("出现重大事故时启动Ⅱ级响应。", 1, 0),
+                        block("组织省级救援力量。", 1, 0),
+                        block("响应终止", 1, 1)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        assertThat(result.emergencyResponses().get(0).directResponseMeasures()).contains("统一组织信息报告");
+        assertThat(result.emergencyResponses().get(1).directResponseMeasures()).contains("统一组织信息报告");
+        assertThat(result.emergencyResponses().get(2).status()).isEqualTo("MISSING");
+        assertThat(result.emergencyResponses().get(3).status()).isEqualTo("MISSING");
+    }
+
+    @Test
+    void splitsCombinedActionGroupsAndRejectsSummaryCounts() {
+        ParsedDocument document = new ParsedDocument(
+                "groups.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("2 指挥体系", 1, 1),
+                        block("现场指挥部共设7个工作组。", 1, 0),
+                        block("2.1 抢险救援组和医疗救护组", 1, 2),
+                        block("负责人员搜救和伤员救治。", 1, 0)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        assertThat(result.actionGroups()).extracting(ActionGroupSegment::name)
+                .contains("抢险救援组", "医疗救护组")
+                .noneMatch(name -> name.contains("7个"));
+    }
+
+    @Test
+    void returnsStableWarningForNonPlanDocuments() {
+        ParsedDocument document = new ParsedDocument(
+                "law.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("第一条 为了维护道路交通秩序，制定本法。", 1, 1),
+                        block("第二条 中华人民共和国境内的车辆驾驶人应当遵守本法。", 1, 1)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        assertThat(result.emergencyResponses()).allSatisfy(level -> assertThat(level.status()).isEqualTo("MISSING"));
+        assertThat(result.warnings()).contains("未识别到应急预案响应结构。");
+    }
+
     private DocumentBlock block(String text, int page, int headingLevel) {
         return new DocumentBlock(text, page, headingLevel, false, List.of());
     }

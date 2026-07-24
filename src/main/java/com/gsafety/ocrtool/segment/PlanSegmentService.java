@@ -33,6 +33,13 @@ public class PlanSegmentService {
             "(?:[（(]?\\d+[）)]\\s*)?([\\p{IsHan}A-Za-z0-9]{2,24}(?:工作组|保障组|指挥组|协调组|处置组|救援组|专家组|行动组|组))(?=[:：。\\s]|$)");
     /** “下设……等工作组”类行内行动组列表。 */
     private static final Pattern INLINE_GROUPS_PATTERN = Pattern.compile("下设(.{2,120}?)等(?:专项)?工作组");
+    private static final Pattern GROUPED_LEVEL_PATTERN = Pattern.compile(
+            "((?:Ⅰ|Ⅱ|Ⅲ|Ⅳ|IV|III|II|I|[一二三四1-4])(?:级)?"
+                    + "(?:[、,，/和及与](?:Ⅰ|Ⅱ|Ⅲ|Ⅳ|IV|III|II|I|[一二三四1-4])(?:级)?)+)"
+                    + "(?:共[一二三四1-4]级)?(?:应急)?(?:响应|反应)",
+            Pattern.CASE_INSENSITIVE);
+    private static final int MAX_LEVEL_WINDOW_BLOCKS = 80;
+    private static final int MAX_FIELD_CHARS = 8_000;
 
     /** 默认规则快照提供器。 */
     private final SegmentRuleProvider ruleProvider;
@@ -85,6 +92,11 @@ public class PlanSegmentService {
         List<ResponseLevelSegment> emergencyResponses = extractLevels(
                 "EMERGENCY", levelDefinitions(false, rules), emergencyBlocks, rules, warnings);
         List<ActionGroupSegment> actionGroups = extractActionGroups(actionGroupBlocks, rules);
+        boolean responseStructureFound = warningResponses.stream().anyMatch(this::hasExtractedContent)
+                || emergencyResponses.stream().anyMatch(this::hasExtractedContent);
+        if (!responseStructureFound) {
+            warnings.add("未识别到应急预案响应结构。");
+        }
         return new SegmentResult(
                 commandSystem,
                 responseLevels,
@@ -93,6 +105,10 @@ public class PlanSegmentService {
                 actionGroups,
                 warnings,
                 rules.version());
+    }
+
+    private boolean hasExtractedContent(ResponseLevelSegment level) {
+        return !"MISSING".equals(level.status());
     }
 
     /**
@@ -220,6 +236,14 @@ public class PlanSegmentService {
                 continue;
             }
             for (LevelDefinition definition : definitions) {
+                if (!isCategoryCompatible(category, i, blocks)) {
+                    continue;
+                }
+                if (isClassificationCondition(category, i, blocks, definition)) {
+                    int end = findClassificationEnd(i, blocks, definitions, rules);
+                    levels.get(definition.key()).addConditionBlocks(blocks.subList(i, end));
+                    continue;
+                }
                 if (!matchesLevelDefinition(block.text(), definition)) {
                     continue;
                 }
@@ -244,9 +268,8 @@ public class PlanSegmentService {
                 levels.get(definition.key()).add(block, parts, title);
             }
         }
-        if ("WARNING".equals(category)) {
-            applyWarningInheritance(levels, definitions, rules);
-        }
+        applyCommonMeasures(category, levels, definitions, blocks, rules);
+        applyMeasureInheritance(levels, definitions, rules);
         List<ResponseLevelSegment> result = new ArrayList<>();
         for (MutableLevel level : levels.values()) {
             ResponseLevelSegment segment = level.toSegment();
@@ -258,6 +281,99 @@ public class PlanSegmentService {
             }
         }
         return List.copyOf(result);
+    }
+
+    private boolean isCategoryCompatible(String category, int index, List<DocumentBlock> blocks) {
+        String current = normalize(blocks.get(index).text());
+        if ("EMERGENCY".equals(category) && current.contains("预警") && !current.contains("应急响应")) {
+            return false;
+        }
+        String nearest = null;
+        for (int i = index; i >= Math.max(0, index - 20); i--) {
+            DocumentBlock block = blocks.get(i);
+            String text = normalize(block.text());
+            if (text.contains("预警")) {
+                nearest = "WARNING";
+                if (block.heading() || i == index) {
+                    break;
+                }
+            }
+            if (text.contains("应急响应") || text.contains("应急反应")
+                    || text.contains("响应行动") || text.contains("反应行动")) {
+                nearest = "EMERGENCY";
+                if (block.heading() || i == index) {
+                    break;
+                }
+            }
+            if (i < index && block.heading() && block.headingLevel() <= 2) {
+                break;
+            }
+        }
+        if ("WARNING".equals(category)) {
+            return current.contains("预警") || "WARNING".equals(nearest);
+        }
+        return !"WARNING".equals(nearest) || current.contains("应急响应") || current.contains("应急反应");
+    }
+
+    private boolean isClassificationCondition(
+            String category,
+            int index,
+            List<DocumentBlock> blocks,
+            LevelDefinition definition) {
+        if (!"EMERGENCY".equals(category)
+                || matchesLevelDefinition(blocks.get(index).text(), definition)
+                || !containsSeverity(blocks.get(index).text(), definition)) {
+            return false;
+        }
+        String current = normalize(blocks.get(index).text());
+        if (current.contains("预警") || current.contains("措施") || current.contains("行动")) {
+            return false;
+        }
+        for (int i = index; i >= Math.max(0, index - 10); i--) {
+            String text = normalize(blocks.get(i).text());
+            if ((text.contains("事件分级") || text.contains("事故分级") || text.contains("灾害分级")
+                    || text.contains("响应分级") || text.contains("分级标准") || text.contains("事件等级"))
+                    && !text.contains("预警")) {
+                return true;
+            }
+            if (i < index && blocks.get(i).heading() && blocks.get(i).headingLevel() <= 2) {
+                break;
+            }
+        }
+        return false;
+    }
+
+    private boolean containsSeverity(String text, LevelDefinition definition) {
+        String value = normalize(text);
+        return switch (definition.key()) {
+            case "level_1" -> value.contains("特别重大");
+            case "level_2" -> !value.contains("特别重大") && value.contains("重大");
+            case "level_3" -> value.contains("较大");
+            case "level_4" -> value.contains("一般");
+            default -> false;
+        };
+    }
+
+    private int findClassificationEnd(
+            int start, List<DocumentBlock> blocks, List<LevelDefinition> definitions, SegmentRules rules) {
+        int anchorLevel = blocks.get(start).headingLevel();
+        int limit = Math.min(blocks.size(), start + 20);
+        int characters = 0;
+        for (int i = start + 1; i < limit; i++) {
+            DocumentBlock block = blocks.get(i);
+            characters += block.text().length();
+            if (characters > MAX_FIELD_CHARS || isResponseBoundary(block.text(), rules)) {
+                return i;
+            }
+            if (definitions.stream().anyMatch(definition -> containsSeverity(block.text(), definition))
+                    && (block.heading() || block.text().length() <= 40)) {
+                return i;
+            }
+            if (anchorLevel > 0 && block.headingLevel() > 0 && block.headingLevel() <= anchorLevel) {
+                return i;
+            }
+        }
+        return limit;
     }
 
     private boolean isPrimaryLevelMention(
@@ -323,7 +439,55 @@ public class PlanSegmentService {
 
     private boolean matchesLevelDefinition(String text, LevelDefinition definition) {
         return matchingAlias(text, definition.aliases()) != null
-                || matchesCompressedLevelMention(text, definition);
+                || matchesCompressedLevelMention(text, definition)
+                || matchesGenericLevelMention(text, definition)
+                || matchesGroupedLevelMention(text, definition);
+    }
+
+    private boolean matchesGenericLevelMention(String text, LevelDefinition definition) {
+        String value = normalize(text);
+        String token = switch (definition.key()) {
+            case "level_1", "warning_level_1" -> "(?:一级|1级|(?<!I)I级|特别重大(?:级)?)";
+            case "level_2", "warning_level_2" -> "(?:二级|2级|(?<!I)II级|(?<!特别)重大(?:级)?)";
+            case "level_3", "warning_level_3" -> "(?:三级|3级|(?<!I)III级|较大(?:级)?)";
+            case "level_4", "warning_level_4" -> "(?:四级|4级|IV级|一般(?:级)?)";
+            default -> null;
+        };
+        if (token == null) {
+            return false;
+        }
+        String response = definition.key().startsWith("warning_")
+                ? "(?:预警响应|预警)"
+                : "(?:应急)?(?:响应|反应)";
+        return Pattern.compile(token + "[\\p{IsHan}]{0,12}" + response).matcher(value).find()
+                || Pattern.compile(response + "(?:行动|的?启动)?" + token).matcher(value).find();
+    }
+
+    private boolean matchesGroupedLevelMention(String text, LevelDefinition definition) {
+        Matcher matcher = GROUPED_LEVEL_PATTERN.matcher(text);
+        while (matcher.find()) {
+            for (String token : matcher.group(1).split("[、,，/和及与]")) {
+                if (levelTokenOrdinal(token) == levelOrdinal(definition)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private int levelTokenOrdinal(String token) {
+        String value = token.replace("级", "").trim().toUpperCase(Locale.ROOT);
+        return switch (value) {
+            case "一", "1", "I", "Ⅰ" -> 1;
+            case "二", "2", "II", "Ⅱ" -> 2;
+            case "三", "3", "III", "Ⅲ" -> 3;
+            case "四", "4", "IV", "Ⅳ" -> 4;
+            default -> 0;
+        };
+    }
+
+    private int levelOrdinal(LevelDefinition definition) {
+        return Character.digit(definition.key().charAt(definition.key().length() - 1), 10);
     }
 
     private boolean matchesCompressedLevelMention(String text, LevelDefinition definition) {
@@ -345,9 +509,14 @@ public class PlanSegmentService {
     private int findLevelWindowEnd(
             int start, List<DocumentBlock> blocks, List<LevelDefinition> definitions, SegmentRules rules) {
         int anchorLevel = blocks.get(start).headingLevel();
-        int limit = Math.min(blocks.size(), start + 60);
+        int limit = Math.min(blocks.size(), start + MAX_LEVEL_WINDOW_BLOCKS);
+        int characters = 0;
         for (int i = start + 1; i < limit; i++) {
             DocumentBlock block = blocks.get(i);
+            characters += block.text().length();
+            if (characters > MAX_FIELD_CHARS) {
+                return i;
+            }
             if (blocks.get(start).table() && !block.table()) {
                 return i;
             }
@@ -443,7 +612,11 @@ public class PlanSegmentService {
                 kind = ContentKind.CONDITION;
             }
             if (isStructuralMarker(
-                    block, text, rules, "response_measure", List.of("响应措施", "应急措施", "处置措施", "协调措施"))) {
+                    block,
+                    text,
+                    rules,
+                    "response_measure",
+                    List.of("响应措施", "应急措施", "处置措施", "协调措施", "响应行动", "响应程序"))) {
                 kind = ContentKind.MEASURE;
                 if (isStandaloneMarker(text)) {
                     continue;
@@ -534,7 +707,8 @@ public class PlanSegmentService {
         // “启动条件”后会意外丢失“响应分级”等基础识别能力。
         List<String> markers = new ArrayList<>(defaults);
         markers.addAll(rules.markerAliases().getOrDefault(code, List.of()));
-        if (markers.stream().noneMatch(text::contains)) {
+        String normalizedText = normalize(text);
+        if (markers.stream().map(this::normalize).noneMatch(normalizedText::contains)) {
             return false;
         }
         if (isStandaloneMarker(text) || block.heading()) {
@@ -596,12 +770,71 @@ public class PlanSegmentService {
         return false;
     }
 
+    private void applyCommonMeasures(
+            String category,
+            Map<String, MutableLevel> levels,
+            List<LevelDefinition> definitions,
+            List<DocumentBlock> blocks,
+            SegmentRules rules) {
+        for (int index = 0; index < blocks.size(); index++) {
+            DocumentBlock marker = blocks.get(index);
+            String text = marker.text();
+            if (!isCategoryCompatible(category, index, blocks)
+                    || matchesAnyLevel(text, definitions)
+                    || !isCommonMeasureHeading(marker, text)) {
+                continue;
+            }
+            int headingLevel = marker.headingLevel() > 0 ? marker.headingLevel() : 3;
+            List<DocumentBlock> common = new ArrayList<>();
+            int characters = 0;
+            for (int i = index + 1; i < Math.min(blocks.size(), index + 30); i++) {
+                DocumentBlock block = blocks.get(i);
+                if (matchesAnyLevel(block.text(), definitions)
+                        || isResponseBoundary(block.text(), rules)
+                        || block.headingLevel() > 0 && block.headingLevel() <= headingLevel) {
+                    break;
+                }
+                characters += block.text().length();
+                if (characters > MAX_FIELD_CHARS) {
+                    break;
+                }
+                common.add(block);
+            }
+            String measures = joinText(common);
+            if (!StringUtils.hasText(measures) || !looksLikeResponseAction(measures)) {
+                continue;
+            }
+            for (MutableLevel level : levels.values()) {
+                if (level.hasContent()) {
+                    level.addSharedMeasures(common, marker.text());
+                }
+            }
+        }
+    }
+
+    private boolean isCommonMeasureHeading(DocumentBlock block, String text) {
+        if (!block.heading() && !isStandaloneMarker(text)) {
+            return false;
+        }
+        String normalized = normalize(text);
+        boolean commonTitle = normalized.contains("共同") || normalized.contains("共性")
+                || normalized.contains("一般程序") || normalized.contains("基本程序")
+                || normalized.contains("响应程序") || normalized.contains("应急处置");
+        return commonTitle
+                || block.headingLevel() > 0 && block.headingLevel() <= 2
+                && (normalized.contains("响应行动") || normalized.contains("反应行动"));
+    }
+
+    private boolean looksLikeResponseAction(String text) {
+        return text.matches("(?s).*(组织|开展|调度|派出|加强|负责|协调|处置|救援|保障|报告|启动|实施).*" );
+    }
+
     /**
      * 解析“在某级基础上”等继承表达式，并展开为最终有效措施。
      *
      * <p>展开过程带环检测，错误配置不会造成无限递归。</p>
      */
-    private void applyWarningInheritance(
+    private void applyMeasureInheritance(
             Map<String, MutableLevel> levels,
             List<LevelDefinition> definitions,
             SegmentRules rules) {
@@ -655,11 +888,23 @@ public class PlanSegmentService {
         if (!StringUtils.hasText(content)) {
             return;
         }
-        content.lines().map(String::trim).filter(StringUtils::hasText).forEach(line -> {
-            if (!target.contains(line)) {
-                target.add(line);
+        int currentLength = target.stream().mapToInt(String::length).sum() + Math.max(0, target.size() - 1);
+        for (String value : content.lines().toList()) {
+            String line = value.trim();
+            if (!StringUtils.hasText(line) || target.contains(line)) {
+                continue;
             }
-        });
+            int separator = target.isEmpty() ? 0 : 1;
+            int remaining = MAX_FIELD_CHARS - currentLength - separator;
+            if (remaining <= 0) {
+                break;
+            }
+            target.add(line.substring(0, Math.min(line.length(), remaining)));
+            currentLength += separator + Math.min(line.length(), remaining);
+            if (line.length() > remaining) {
+                break;
+            }
+        }
     }
 
     /**
@@ -676,15 +921,16 @@ public class PlanSegmentService {
             String text = block.text().trim();
             Matcher matcher = ACTION_GROUP_PATTERN.matcher(text);
             while (matcher.find()) {
-                String name = cleanGroupName(matcher.group(1));
-                if (!isUsefulGroupName(name)) {
-                    continue;
+                for (String name : splitGroupNames(cleanGroupName(matcher.group(1)))) {
+                    if (!isUsefulGroupName(name)) {
+                        continue;
+                    }
+                    String detail = text;
+                    if (text.length() <= name.length() + 8 && i + 1 < blocks.size()) {
+                        detail = text + "\n" + blocks.get(i + 1).text();
+                    }
+                    mergeActionGroup(groups, name, detail, block.page(), rules);
                 }
-                String detail = text;
-                if (text.length() <= name.length() + 8 && i + 1 < blocks.size()) {
-                    detail = text + "\n" + blocks.get(i + 1).text();
-                }
-                mergeActionGroup(groups, name, detail, block.page(), rules);
             }
             Matcher inline = INLINE_GROUPS_PATTERN.matcher(text);
             if (inline.find()) {
@@ -713,12 +959,23 @@ public class PlanSegmentService {
     }
 
     private String cleanGroupName(String name) {
-        return name.replaceFirst("^[（(]?\\d+[）)]", "").trim();
+        return name.replaceFirst("^(?:[（(]?[一二三四五六七八九十0-9]+[）)]|\\d+(?:\\.\\d+)+)[、.．]?", "")
+                .trim();
+    }
+
+    private List<String> splitGroupNames(String name) {
+        Matcher matcher = Pattern.compile("^(.+?组)[和及、](.+?组)$").matcher(name);
+        return matcher.matches()
+                ? List.of(cleanGroupName(matcher.group(1)), cleanGroupName(matcher.group(2)))
+                : List.of(name);
     }
 
     private boolean isUsefulGroupName(String name) {
         return StringUtils.hasText(name)
                 && name.length() >= 3
+                && !name.matches(".*[0-9一二三四五六七八九十]+个(?:专项)?工作组.*")
+                && !name.startsWith("个工作组")
+                && !name.startsWith("设立工作组")
                 && !Set.of("各工作组", "工作组", "领导小组", "指挥部工作组").contains(name);
     }
 
@@ -975,7 +1232,8 @@ public class PlanSegmentService {
     }
 
     private boolean startsWithNumber(String text) {
-        return text.matches("^(第[一二三四五六七八九十]+[章节篇]|[一二三四五六七八九十]+[、.]|\\d+(?:\\.\\d+){0,3}[、.\\s]).*");
+        return text.matches("^(第[〇零一二三四五六七八九十百千万0-9]+[章节篇条]"
+                + "|[〇零一二三四五六七八九十百千万]+[、.]|\\d+(?:\\.\\d+){0,5}[、.\\s]).*");
     }
 
     private int inferHeadingLevel(String text, SegmentRules rules) {
@@ -988,7 +1246,7 @@ public class PlanSegmentService {
         if (rules.responseTailHeadings().stream().map(this::normalize).anyMatch(normalize(text)::contains)) {
             return 2;
         }
-        if (text.matches("^第[一二三四五六七八九十]+[章节篇].*")) {
+        if (text.matches("^第[〇零一二三四五六七八九十百千万0-9]+[章节篇条].*")) {
             return 1;
         }
         if (text.matches("^[一二三四五六七八九十]+[、.].*")) {
@@ -1001,12 +1259,27 @@ public class PlanSegmentService {
     }
 
     private String joinText(List<DocumentBlock> blocks) {
-        return blocks.stream()
-                .map(DocumentBlock::text)
-                .filter(StringUtils::hasText)
-                .distinct()
-                .reduce((left, right) -> left + "\n" + right)
-                .orElse("");
+        StringBuilder result = new StringBuilder();
+        Set<String> seen = new LinkedHashSet<>();
+        for (DocumentBlock block : blocks) {
+            String text = block.text();
+            if (!StringUtils.hasText(text) || !seen.add(text)) {
+                continue;
+            }
+            int remaining = MAX_FIELD_CHARS - result.length();
+            if (remaining <= 0) {
+                break;
+            }
+            if (!result.isEmpty()) {
+                result.append('\n');
+                remaining--;
+            }
+            result.append(text, 0, Math.min(text.length(), Math.max(0, remaining)));
+            if (text.length() > remaining) {
+                break;
+            }
+        }
+        return result.toString();
     }
 
     private List<Integer> pages(List<DocumentBlock> blocks) {
@@ -1023,8 +1296,22 @@ public class PlanSegmentService {
         if (text == null) {
             return "";
         }
-        return text.replaceAll("[\\s　:：；;（）()\\[\\]【】]", "")
+        String value = text.replace('０', '0').replace('１', '1').replace('２', '2')
+                .replace('３', '3').replace('４', '4').replace('５', '5')
+                .replace('６', '6').replace('７', '7').replace('８', '8').replace('９', '9')
+                .replace('．', '.');
+        Matcher numbering = Pattern.compile("^(\\d+(?:\\.[\\dlLI]+)+)").matcher(value);
+        if (numbering.find()) {
+            String prefix = numbering.group().replace('l', '1').replace('L', '1');
+            value = prefix + value.substring(numbering.end());
+        }
+        return value.replace("应急反应", "应急响应")
+                .replace("反应行动", "响应行动")
+                .replace("反应措施", "响应措施")
+                .replace("反应程序", "响应程序")
+                .replaceAll("[\\s　:：；;（）()\\[\\]【】]", "")
                 .replace("Ｉ", "I")
+                .replace("Ⅰ", "I")
                 .replace("Ⅱ", "II")
                 .replace("Ⅲ", "III")
                 .replace("Ⅳ", "IV")
@@ -1099,6 +1386,33 @@ public class PlanSegmentService {
             if (evidence.size() < 5 && !evidence.contains(block.text())) {
                 evidence.add(block.text());
             }
+        }
+
+        private void addConditionBlocks(List<DocumentBlock> blocks) {
+            if (blocks.isEmpty()) {
+                return;
+            }
+            if (title == null) {
+                title = definition.level();
+            }
+            addParagraphs(conditions, joinText(blocks));
+            conditionPages.addAll(pages(blocks));
+            String first = blocks.get(0).text();
+            if (evidence.size() < 5 && !evidence.contains(first)) {
+                evidence.add(first);
+            }
+        }
+
+        private void addSharedMeasures(List<DocumentBlock> blocks, String marker) {
+            addParagraphs(measures, joinText(blocks));
+            measurePages.addAll(pages(blocks));
+            if (evidence.size() < 5 && !evidence.contains(marker)) {
+                evidence.add(marker);
+            }
+        }
+
+        private boolean hasContent() {
+            return !conditions.isEmpty() || !measures.isEmpty();
         }
 
         private LevelDefinition definition() {
