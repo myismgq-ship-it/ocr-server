@@ -928,8 +928,8 @@ public class PlanSegmentService {
     }
 
     private boolean containsAlias(String normalizedText, String normalizedAlias) {
-        if (normalizedAlias.matches("I{1,3}级响应|IV级响应")) {
-            return Pattern.compile("(^|[^I])" + Pattern.quote(normalizedAlias) + "($|[^I])")
+        if (normalizedAlias.matches("(?:I{1,3}|IV)级(?:应急)?响应")) {
+            return Pattern.compile("(^|[^IV])" + Pattern.quote(normalizedAlias) + "($|[^IV])")
                     .matcher(normalizedText)
                     .find();
         }

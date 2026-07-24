@@ -149,7 +149,7 @@ plan:
 - `SPRING_DATASOURCE_USERNAME`
 - `SPRING_DATASOURCE_PASSWORD`
 
-旧环境仍可用 `src/main/resources/db/postgresql/migration/upgrade_plan_digitize_v2.sql` 做一次性升级；完成后应由 Flyway 接管后续版本。V2 迁移增加模板/规则修订和人工复核审计表；V4 新增带完整中文注释的 `plan_catalog` 预案目录表，并从已有任务安全回填基础目录。规则默认缓存一分钟，每份文档只读取一次不可变规则快照，结果中的 `ruleVersion` 用于复现。
+旧环境仍可用 `src/main/resources/db/postgresql/migration/upgrade_plan_digitize_v2.sql` 做一次性升级；完成后应由 Flyway 接管后续版本。V2 迁移增加模板/规则修订和人工复核审计表；V4 新增带完整中文注释的 `plan_catalog` 预案目录表，并从已有任务安全回填基础目录；V5 增加“Ⅰ/Ⅱ/Ⅲ/Ⅳ级应急响应”规则别名。规则默认缓存一分钟，每份文档只读取一次不可变规则快照，结果中的 `ruleVersion` 用于复现。
 
 URL 下载默认拒绝回环、私网、链路本地、组播、CGNAT 地址和非法端口，并会对每次重定向重新验证。生产环境必须设置 `PLAN_DOCUMENT_ALLOWED_HOSTS` 为逗号分隔的业务域名白名单；不要把服务端口直接暴露到网关之外。
 

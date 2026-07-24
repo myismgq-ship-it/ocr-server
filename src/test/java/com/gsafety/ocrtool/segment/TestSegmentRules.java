@@ -11,10 +11,10 @@ public final class TestSegmentRules {
 
     public static SegmentRules defaults() {
         Map<String, List<String>> responseAliases = new LinkedHashMap<>();
-        responseAliases.put("一级响应", List.of("一级响应", "一级应急响应", "Ⅰ级响应", "I级响应", "特别重大响应"));
-        responseAliases.put("二级响应", List.of("二级响应", "二级应急响应", "Ⅱ级响应", "II级响应", "重大响应"));
-        responseAliases.put("三级响应", List.of("三级响应", "三级应急响应", "Ⅲ级响应", "III级响应", "较大响应"));
-        responseAliases.put("四级响应", List.of("四级响应", "四级应急响应", "Ⅳ级响应", "IV级响应", "一般响应"));
+        responseAliases.put("一级响应", List.of("一级响应", "一级应急响应", "Ⅰ级响应", "Ⅰ级应急响应", "I级响应", "特别重大响应"));
+        responseAliases.put("二级响应", List.of("二级响应", "二级应急响应", "Ⅱ级响应", "Ⅱ级应急响应", "II级响应", "重大响应"));
+        responseAliases.put("三级响应", List.of("三级响应", "三级应急响应", "Ⅲ级响应", "Ⅲ级应急响应", "III级响应", "较大响应"));
+        responseAliases.put("四级响应", List.of("四级响应", "四级应急响应", "Ⅳ级响应", "Ⅳ级应急响应", "IV级响应", "一般响应"));
         Map<String, String> responseKeys = new LinkedHashMap<>();
         responseKeys.put("一级响应", "level_1");
         responseKeys.put("二级响应", "level_2");

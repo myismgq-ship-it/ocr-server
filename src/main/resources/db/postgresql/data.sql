@@ -10,24 +10,28 @@ VALUES
     ('RESPONSE', 'level_1', '一级响应', '一级响应',       10, 10, TRUE),
     ('RESPONSE', 'level_1', '一级响应', '一级应急响应',   10, 20, TRUE),
     ('RESPONSE', 'level_1', '一级响应', 'Ⅰ级响应',        10, 30, TRUE),
+    ('RESPONSE', 'level_1', '一级响应', 'Ⅰ级应急响应',    10, 35, TRUE),
     ('RESPONSE', 'level_1', '一级响应', 'I级响应',         10, 40, TRUE),
     ('RESPONSE', 'level_1', '一级响应', '特别重大响应',    10, 50, TRUE),
 
     ('RESPONSE', 'level_2', '二级响应', '二级响应',       20, 10, TRUE),
     ('RESPONSE', 'level_2', '二级响应', '二级应急响应',   20, 20, TRUE),
     ('RESPONSE', 'level_2', '二级响应', 'Ⅱ级响应',        20, 30, TRUE),
+    ('RESPONSE', 'level_2', '二级响应', 'Ⅱ级应急响应',    20, 35, TRUE),
     ('RESPONSE', 'level_2', '二级响应', 'II级响应',        20, 40, TRUE),
     ('RESPONSE', 'level_2', '二级响应', '重大响应',        20, 50, TRUE),
 
     ('RESPONSE', 'level_3', '三级响应', '三级响应',       30, 10, TRUE),
     ('RESPONSE', 'level_3', '三级响应', '三级应急响应',   30, 20, TRUE),
     ('RESPONSE', 'level_3', '三级响应', 'Ⅲ级响应',        30, 30, TRUE),
+    ('RESPONSE', 'level_3', '三级响应', 'Ⅲ级应急响应',    30, 35, TRUE),
     ('RESPONSE', 'level_3', '三级响应', 'III级响应',       30, 40, TRUE),
     ('RESPONSE', 'level_3', '三级响应', '较大响应',        30, 50, TRUE),
 
     ('RESPONSE', 'level_4', '四级响应', '四级响应',       40, 10, TRUE),
     ('RESPONSE', 'level_4', '四级响应', '四级应急响应',   40, 20, TRUE),
     ('RESPONSE', 'level_4', '四级响应', 'Ⅳ级响应',        40, 30, TRUE),
+    ('RESPONSE', 'level_4', '四级响应', 'Ⅳ级应急响应',    40, 35, TRUE),
     ('RESPONSE', 'level_4', '四级响应', 'IV级响应',        40, 40, TRUE),
     ('RESPONSE', 'level_4', '四级响应', '一般响应',        40, 50, TRUE),
 

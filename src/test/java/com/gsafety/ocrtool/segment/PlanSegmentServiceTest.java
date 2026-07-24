@@ -408,6 +408,49 @@ class PlanSegmentServiceTest {
         assertThat(level2.activationConditions()).contains("重大粮食").doesNotContain("组织成员单位");
         assertThat(level2.directResponseMeasures()).contains("组织成员单位");
     }
+
+    @Test
+    void extractsRomanNumeralEmergencyResponseHeadingsFromConfiguredAliases() {
+        ParsedDocument document = new ParsedDocument(
+                "roman-level-plan.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("应急响应", 1, 1),
+                        block("Ⅰ级应急响应", 1, 2),
+                        block("启动条件", 1, 3),
+                        block("发生一级事件。", 1, 0),
+                        block("响应措施", 1, 3),
+                        block("组织救援力量开展一级处置。", 1, 0),
+                        block("Ⅱ级应急响应", 1, 2),
+                        block("启动条件", 1, 3),
+                        block("发生二级事件。", 1, 0),
+                        block("响应措施", 1, 3),
+                        block("组织救援力量开展二级处置。", 1, 0),
+                        block("Ⅲ级应急响应", 1, 2),
+                        block("启动条件", 1, 3),
+                        block("发生三级事件。", 1, 0),
+                        block("响应措施", 1, 3),
+                        block("组织救援力量开展三级处置。", 1, 0),
+                        block("Ⅳ级应急响应", 1, 2),
+                        block("启动条件", 1, 3),
+                        block("发生四级事件。", 1, 0),
+                        block("响应措施", 1, 3),
+                        block("组织救援力量开展四级处置。", 1, 0),
+                        block("响应终止", 1, 1)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        assertThat(result.emergencyResponses()).extracting(ResponseLevelSegment::title)
+                .containsExactly("Ⅰ级应急响应", "Ⅱ级应急响应", "Ⅲ级应急响应", "Ⅳ级应急响应");
+        assertThat(result.emergencyResponses()).allSatisfy(level -> {
+            assertThat(level.status()).isEqualTo("EXTRACTED");
+            assertThat(level.activationConditions()).contains("事件");
+            assertThat(level.directResponseMeasures()).contains("救援力量");
+        });
+    }
+
     private DocumentBlock block(String text, int page, int headingLevel) {
         return new DocumentBlock(text, page, headingLevel, false, List.of());
     }
