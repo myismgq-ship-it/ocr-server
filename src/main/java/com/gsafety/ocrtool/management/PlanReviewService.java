@@ -33,14 +33,18 @@ public class PlanReviewService {
     private final PlanDigitizeTaskRepository taskRepository;
     /** 原始/修订结果 JSON 序列化器。 */
     private final ObjectMapper objectMapper;
+    /** 将人工确认结果沉淀为可回归评测的准确率样本。*/
+    private final PlanAccuracyService accuracyService;
 
     public PlanReviewService(
             JdbcTemplate jdbc,
             PlanDigitizeTaskRepository taskRepository,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            PlanAccuracyService accuracyService) {
         this.jdbc = jdbc;
         this.taskRepository = taskRepository;
         this.objectMapper = objectMapper;
+        this.accuracyService = accuracyService;
     }
 
     /**
@@ -89,7 +93,10 @@ public class PlanReviewService {
                 caller(reviewerId),
                 request.note(),
                 now);
-        return get(reviewId);
+        ReviewResponse review = get(reviewId);
+        // 一次复核对应一个不可变样本版本；同源任务的旧样本会归档，保留审计链路。
+        accuracyService.registerReviewSample(review);
+        return review;
     }
 
     public List<ReviewResponse> history(String planId, UUID taskId) {

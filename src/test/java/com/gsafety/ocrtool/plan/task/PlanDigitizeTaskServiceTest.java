@@ -1,5 +1,6 @@
 package com.gsafety.ocrtool.plan.task;
 
+import com.gsafety.ocrtool.management.PlanAccuracyService;
 import com.gsafety.ocrtool.response.PlanDigitizeTaskResponse;
 import java.time.OffsetDateTime;
 import java.util.Optional;
@@ -22,7 +23,7 @@ class PlanDigitizeTaskServiceTest {
         PlanTaskStorageService storage = mock(PlanTaskStorageService.class);
         PlanDigitizeTask active = task(PlanDigitizeTaskStatus.RUNNING);
         when(repository.findActive("plan-1")).thenReturn(Optional.of(active));
-        PlanDigitizeTaskService service = new PlanDigitizeTaskService(repository, storage, new ObjectMapper());
+        PlanDigitizeTaskService service = new PlanDigitizeTaskService(repository, storage, new ObjectMapper(), mock(PlanAccuracyService.class));
 
         PlanDigitizeTaskResponse response = service.createUpload(
                 "plan-1", new MockMultipartFile("file", "plan.pdf", "application/pdf", new byte[] {1}));

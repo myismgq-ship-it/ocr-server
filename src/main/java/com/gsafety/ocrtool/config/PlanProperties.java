@@ -179,6 +179,8 @@ public class PlanProperties {
         private Duration lease = Duration.ofMinutes(5);
         /** 活动任务心跳间隔，应明显小于 lease。 */
         private Duration failedFileRetention = Duration.ofDays(7);
+        /** 成功任务源文件保留时长，用于复核后按新规则回归重跑。*/
+        private Duration completedSourceRetention = Duration.ofDays(90);
         /** 超过该时长没有心跳即认为租约失效。 */
         private Duration orphanFileRetention = Duration.ofHours(1);
         /** 失败任务源文件保留时间，用于重试和排查。 */
@@ -234,6 +236,13 @@ public class PlanProperties {
             this.failedFileRetention = failedFileRetention;
         }
 
+        public Duration getCompletedSourceRetention() {
+            return completedSourceRetention;
+        }
+
+        public void setCompletedSourceRetention(Duration completedSourceRetention) {
+            this.completedSourceRetention = completedSourceRetention;
+        }
         public Duration getOrphanFileRetention() {
             return orphanFileRetention;
         }

@@ -108,7 +108,9 @@ public class PlanDigitizeTaskDispatcher {
     @Scheduled(cron = "0 20 3 * * *")
     public void cleanupExpiredFailedFiles() {
         // 成功和取消任务不应保留源文件；异常退出遗留的文件在这里补偿删除。
-        for (PlanDigitizeTask task : repository.findCompletedFilesPendingCleanup()) {
+        // 成功任务保留源文件一段时间，供人工复核后的回归重跑使用；到期后统一清理。
+        OffsetDateTime completedCutoff = OffsetDateTime.now().minus(properties.getTask().getCompletedSourceRetention());
+        for (PlanDigitizeTask task : repository.findExpiredCompletedFiles(completedCutoff)) {
             if (storageService.delete(task.sourcePath())) {
                 repository.clearSourcePath(task.taskId());
             }

@@ -251,6 +251,14 @@ public class PlanDigitizeTaskRepository {
     }
 
     /** 查询成功后仍残留源文件的任务，用于补偿清理。 */
+    /** 查询超过成功任务源文件保留期、可安全清理的任务。 */
+    public List<PlanDigitizeTask> findExpiredCompletedFiles(OffsetDateTime cutoff) {
+        return jdbcTemplate.query(
+                "SELECT " + COLUMNS + " FROM plan_digitize_task "
+                        + "WHERE status = 'COMPLETED' AND source_path IS NOT NULL AND completed_at < ?",
+                this::mapRow,
+                cutoff);
+    }
     public List<PlanDigitizeTask> findCompletedFilesPendingCleanup() {
         return jdbcTemplate.query(
                 "SELECT " + COLUMNS + " FROM plan_digitize_task "

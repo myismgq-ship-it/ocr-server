@@ -1,6 +1,7 @@
 package com.gsafety.ocrtool.plan.task;
 
 import com.gsafety.ocrtool.common.OcrException;
+import com.gsafety.ocrtool.management.PlanAccuracyService;
 import com.gsafety.ocrtool.response.PlanDigitizeResponse;
 import com.gsafety.ocrtool.response.PlanDigitizeTaskPageResponse;
 import com.gsafety.ocrtool.response.PlanDigitizeTaskResponse;
@@ -29,14 +30,18 @@ public class PlanDigitizeTaskService {
     private final PlanTaskStorageService storageService;
     /** 完成结果 JSON 与响应对象之间的转换器。 */
     private final ObjectMapper objectMapper;
+    /** 用于校验历史重跑是否已有人工确认样本。*/
+    private final PlanAccuracyService accuracyService;
 
     public PlanDigitizeTaskService(
             PlanDigitizeTaskRepository repository,
             PlanTaskStorageService storageService,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            PlanAccuracyService accuracyService) {
         this.repository = repository;
         this.storageService = storageService;
         this.objectMapper = objectMapper;
+        this.accuracyService = accuracyService;
     }
 
     /**
@@ -162,6 +167,46 @@ public class PlanDigitizeTaskService {
     /**
      * 取消排队中或运行中的任务，并尽力清理上传源文件。
      */
+    /**
+     * 使用当前已发布规则重新执行已人工复核的历史任务。
+     *
+     * <p>上传文件必须仍在受控任务存储中；URL 任务会再次经过下载白名单与 SSRF 校验。
+     * 重跑创建新任务，不会覆盖源任务、人工样本或既有评测记录。</p>
+     */
+    public PlanDigitizeTaskResponse replayForEvaluation(String planId, UUID sourceTaskId) {
+        validatePlanId(planId);
+        PlanDigitizeTask source = find(planId, sourceTaskId);
+        if (source.status() != PlanDigitizeTaskStatus.COMPLETED) {
+            throw new OcrException(HttpStatus.BAD_REQUEST, "TASK_NOT_REPLAYABLE", "只有已完成任务可以重新评测。");
+        }
+        if (!accuracyService.hasActiveSample(sourceTaskId)) {
+            throw new OcrException(HttpStatus.CONFLICT, "TASK_NO_ACCURACY_SAMPLE", "请先完成人工复核，系统才能将其作为准确率样本重新评测。");
+        }
+        var active = repository.findActive(planId);
+        if (active.isPresent()) {
+            return toResponse(active.get(), true);
+        }
+        UUID taskId = UUID.randomUUID();
+        StoredTaskFile stored = source.sourceType() == PlanDigitizeTaskSourceType.UPLOAD
+                ? storageService.copy(taskId, source)
+                : null;
+        PlanDigitizeTask replay = newTask(
+                taskId, planId, source.sourceType(), stored, source.sourceUrl(), source.taskId());
+        try {
+            repository.insert(replay);
+            return toResponse(replay, false);
+        } catch (DuplicateKeyException ex) {
+            if (stored != null) {
+                storageService.delete(stored.path());
+            }
+            return toResponse(repository.findActive(planId).orElseThrow(() -> ex), true);
+        } catch (RuntimeException ex) {
+            if (stored != null) {
+                storageService.delete(stored.path());
+            }
+            throw ex;
+        }
+    }
     public PlanDigitizeTaskResponse cancel(String planId, UUID taskId) {
         validatePlanId(planId);
         PlanDigitizeTask task = find(planId, taskId);
