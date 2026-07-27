@@ -47,6 +47,7 @@ public class PlanDigitizeTaskRepository {
             WITH next_task AS (
                 SELECT task_id FROM plan_digitize_task
                 WHERE status = 'QUEUED'
+                  AND (source_type = 'URL' OR starts_with(source_path, ?))
                 ORDER BY queued_at
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
@@ -132,11 +133,17 @@ public class PlanDigitizeTaskRepository {
      *
      * @return 当前执行者成功领取的任务；没有可用任务时为空
      */
+    /** Claims URL tasks or uploads stored below the current node's task directory. */
     @Transactional
-    public Optional<PlanDigitizeTask> claimNext(String workerId, UUID claimToken, OffsetDateTime now) {
+    public Optional<PlanDigitizeTask> claimNext(
+            String workerId,
+            UUID claimToken,
+            OffsetDateTime now,
+            String uploadPathPrefix) {
         return first(jdbcTemplate.query(
                 CLAIM_NEXT_SQL,
                 this::mapRow,
+                uploadPathPrefix,
                 workerId,
                 now,
                 claimToken,

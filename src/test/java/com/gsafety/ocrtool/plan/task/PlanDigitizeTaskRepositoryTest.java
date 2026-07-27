@@ -11,6 +11,7 @@ class PlanDigitizeTaskRepositoryTest {
         String normalized = PlanDigitizeTaskRepository.CLAIM_NEXT_SQL.replaceAll("\\s+", " ");
 
         assertThat(normalized).contains("RETURNING task.task_id AS task_id");
+        assertThat(normalized).contains("source_type = 'URL' OR starts_with(source_path, ?)");
         assertThat(normalized).doesNotContain("RETURNINGtask_id");
         assertThat(normalized).doesNotContain("RETURNING task_id");
     }

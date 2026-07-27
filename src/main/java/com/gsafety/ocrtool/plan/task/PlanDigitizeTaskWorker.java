@@ -8,6 +8,7 @@ import com.gsafety.ocrtool.common.ProcessingProgressListener;
 import com.gsafety.ocrtool.document.DownloadedDocument;
 import com.gsafety.ocrtool.plan.PlanDigitizeService;
 import com.gsafety.ocrtool.response.PlanDigitizeResponse;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.OffsetDateTime;
 import java.util.Map;
@@ -123,8 +124,15 @@ public class PlanDigitizeTaskWorker {
     }
     private PlanDigitizeResponse digitizeUpload(
             PlanDigitizeTask task, ProcessingProgressListener progressListener) {
+        Path sourcePath = Path.of(task.sourcePath()).toAbsolutePath().normalize();
+        if (!Files.isRegularFile(sourcePath)) {
+            throw new OcrException(
+                    org.springframework.http.HttpStatus.INTERNAL_SERVER_ERROR,
+                    "TASK_SOURCE_UNAVAILABLE",
+                    "任务源文件在当前执行节点不可用，请检查多节点任务存储配置。");
+        }
         DownloadedDocument document = new DownloadedDocument(
-                Path.of(task.sourcePath()),
+                sourcePath,
                 task.fileName(),
                 task.contentType(),
                 task.fileSize() == null ? 0 : task.fileSize(),

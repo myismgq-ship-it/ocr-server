@@ -15,12 +15,16 @@ import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.apache.poi.xwpf.usermodel.XWPFTable;
 import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 import org.apache.poi.xwpf.usermodel.XWPFTableRow;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
 @Component
 public class WordDocumentParser implements DocumentParser {
+
+    private static final Logger log = LoggerFactory.getLogger(WordDocumentParser.class);
 
     @Override
     public boolean supports(DocumentFileType fileType) {
@@ -35,6 +39,9 @@ public class WordDocumentParser implements DocumentParser {
             }
             return parseDoc(document);
         } catch (IOException | RuntimeException ex) {
+            log.error(
+                    "Word document parsing failed, fileName={}, fileType={}, path={}, declaredSize={}",
+                    document.fileName(), document.fileType(), document.path(), document.size(), ex);
             throw new OcrException(HttpStatus.BAD_REQUEST, "DOCUMENT_PARSE_FAILED", "Word 文档解析失败。", ex);
         }
     }

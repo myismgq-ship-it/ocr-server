@@ -56,9 +56,9 @@ class PlanDigitizeTaskRepositoryIntegrationTest {
         var executor = Executors.newFixedThreadPool(2);
         try {
             Future<Optional<PlanDigitizeTask>> first = executor.submit(
-                    () -> repository.claimNext("worker-a", UUID.randomUUID(), OffsetDateTime.now()));
+                    () -> repository.claimNext("worker-a", UUID.randomUUID(), OffsetDateTime.now(), ""));
             Future<Optional<PlanDigitizeTask>> second = executor.submit(
-                    () -> repository.claimNext("worker-b", UUID.randomUUID(), OffsetDateTime.now()));
+                    () -> repository.claimNext("worker-b", UUID.randomUUID(), OffsetDateTime.now(), ""));
 
             assertThat(first.get()).isPresent();
             assertThat(second.get()).isPresent();
@@ -75,11 +75,11 @@ class PlanDigitizeTaskRepositoryIntegrationTest {
         repository.insert(queued);
         OffsetDateTime now = OffsetDateTime.now();
         UUID firstToken = UUID.randomUUID();
-        PlanDigitizeTask first = repository.claimNext("worker-a", firstToken, now).orElseThrow();
+        PlanDigitizeTask first = repository.claimNext("worker-a", firstToken, now, "").orElseThrow();
 
         assertThat(repository.requeueStale(now.plusMinutes(10))).isEqualTo(1);
         UUID secondToken = UUID.randomUUID();
-        PlanDigitizeTask second = repository.claimNext("worker-b", secondToken, now.plusMinutes(10))
+        PlanDigitizeTask second = repository.claimNext("worker-b", secondToken, now.plusMinutes(10), "")
                 .orElseThrow();
 
         assertThat(repository.complete(

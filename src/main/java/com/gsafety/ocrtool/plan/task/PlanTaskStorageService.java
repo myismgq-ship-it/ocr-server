@@ -39,6 +39,14 @@ public class PlanTaskStorageService {
     }
 
     /**
+     * Database path prefix used to keep locally stored uploads on a node that can access them.
+     * A shared directory has the same normalized prefix on every participating node.
+     */
+    String claimPathPrefix() {
+        return root + root.getFileSystem().getSeparator();
+    }
+
+    /**
      * 校验上传文档并移动到任务专属路径。
      *
      * @param taskId 新任务 ID，用作稳定且不可注入的文件名

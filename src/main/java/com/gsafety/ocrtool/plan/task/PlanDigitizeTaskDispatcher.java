@@ -64,7 +64,12 @@ public class PlanDigitizeTaskDispatcher {
             UUID claimToken = UUID.randomUUID();
             long claimStarted = System.nanoTime();
             PlanDigitizeTask task = repository
-                    .claimNext(workerId, claimToken, OffsetDateTime.now()).orElse(null);
+                    .claimNext(
+                            workerId,
+                            claimToken,
+                            OffsetDateTime.now(),
+                            storageService.claimPathPrefix())
+                    .orElse(null);
             ProcessingMetrics.record("database_wait", claimStarted);
             if (task == null) {
                 permits.release();
