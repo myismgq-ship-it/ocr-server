@@ -145,6 +145,40 @@ class PlanSegmentServiceTest {
     }
 
     @Test
+    void separatesGroupedWarningTriggersAndExpandsEnhancedMeasures() {
+        ParsedDocument document = new ParsedDocument("plan.docx", DocumentFileType.DOCX, DocumentParseMode.WORD, List.of(
+                block("预警响应", 2, 3),
+                block("当发布蓝色、黄色预警信息后，密切关注天气，加强巡护，做好扑火准备。", 2, 0),
+                block("当发布橙色、红色预警信息后，在蓝色、黄色预警响应措施的基础上，开展防火检查，做好物资调拨准备。", 2, 0),
+                block("市、区指挥部视情进行督促和指导。", 2, 0),
+                block("信息报告", 2, 2),
+                block("红色预警状况下发生的森林火灾应及时报告。", 2, 0),
+                block("应急响应", 3, 2),
+                block("森林火灾发生后组织救援。", 3, 0)
+        ), List.of());
+
+        SegmentResult result = service.extract(document);
+
+        ResponseLevelSegment red = result.warningResponses().get(0);
+        ResponseLevelSegment orange = result.warningResponses().get(1);
+        ResponseLevelSegment yellow = result.warningResponses().get(2);
+        ResponseLevelSegment blue = result.warningResponses().get(3);
+        assertThat(red.activationConditions()).isEqualTo("当发布橙色、红色预警信息后");
+        assertThat(orange.activationConditions()).isEqualTo("当发布橙色、红色预警信息后");
+        assertThat(yellow.activationConditions()).isEqualTo("当发布蓝色、黄色预警信息后");
+        assertThat(blue.activationConditions()).isEqualTo("当发布蓝色、黄色预警信息后");
+        assertThat(red.directResponseMeasures()).contains("开展防火检查").doesNotContain("密切关注天气");
+        assertThat(red.responseMeasures()).contains("密切关注天气", "开展防火检查");
+        assertThat(orange.responseMeasures()).contains("密切关注天气", "开展防火检查");
+        assertThat(yellow.directResponseMeasures()).contains("密切关注天气").doesNotContain("开展防火检查");
+        assertThat(blue.directResponseMeasures()).contains("密切关注天气").doesNotContain("开展防火检查");
+        assertThat(result.warningResponses()).allSatisfy(level -> {
+            assertThat(level.activationConditions()).doesNotContain("信息报告", "应急响应");
+            assertThat(level.responseMeasures()).doesNotContain("森林火灾发生后组织救援");
+        });
+    }
+
+    @Test
     void extractsActivationConditionsFromSidewaysResponseTableColumns() {
         ParsedDocument document = new ParsedDocument("plan.pdf", DocumentFileType.PDF, DocumentParseMode.OCR, List.of(
                 table("四级响应"),

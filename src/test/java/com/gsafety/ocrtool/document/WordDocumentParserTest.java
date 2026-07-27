@@ -4,7 +4,10 @@ import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
+import org.apache.poi.xwpf.usermodel.XWPFStyle;
 import org.apache.poi.xwpf.usermodel.XWPFTable;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTStyle;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STStyleType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -24,6 +27,7 @@ class WordDocumentParserTest {
              OutputStream output = Files.newOutputStream(path)) {
             document.createParagraph().createRun().setText("5.1一级响应");
             document.createParagraph().createRun().setText("\uFEFF启动条件");
+            document.createParagraph().createRun().setText("4小时尚未扑灭明火的森林火灾");
             document.write(output);
         }
         DownloadedDocument downloaded = new DownloadedDocument(
@@ -35,9 +39,31 @@ class WordDocumentParserTest {
 
         ParsedDocument result = parser.parse(downloaded);
 
-        assertThat(result.blocks()).hasSize(2);
+        assertThat(result.blocks()).hasSize(3);
         assertThat(result.blocks().get(0).headingLevel()).isEqualTo(2);
         assertThat(result.blocks().get(1).text()).isEqualTo("启动条件");
+        assertThat(result.blocks().get(2).headingLevel()).isZero();
+    }
+
+    @Test
+    void resolvesHeadingLevelFromNumericStyleId() throws Exception {
+        Path path = tempDirectory.resolve("numeric-style.docx");
+        try (XWPFDocument document = new XWPFDocument();
+             OutputStream output = Files.newOutputStream(path)) {
+            CTStyle styleDefinition = CTStyle.Factory.newInstance();
+            styleDefinition.setStyleId("5");
+            styleDefinition.setType(STStyleType.PARAGRAPH);
+            styleDefinition.addNewName().setVal("heading 3");
+            document.createStyles().addStyle(new XWPFStyle(styleDefinition));
+            document.createParagraph().setStyle("5");
+            document.getParagraphs().get(0).createRun().setText("预警响应");
+            document.write(output);
+        }
+
+        ParsedDocument result = parser.parse(downloaded(path));
+
+        assertThat(result.blocks()).singleElement()
+                .satisfies(block -> assertThat(block.headingLevel()).isEqualTo(3));
     }
 
     @Test

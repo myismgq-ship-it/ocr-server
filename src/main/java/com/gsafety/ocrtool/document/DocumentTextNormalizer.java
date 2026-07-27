@@ -10,7 +10,8 @@ import org.springframework.util.StringUtils;
 final class DocumentTextNormalizer {
 
     private static final Pattern ARABIC_NUMBERED_HEADING = Pattern.compile(
-            "^(\\d+(?:\\.\\d+){0,5})(?:[、.\\s　]+|(?=[\\p{IsHan}])).{0,80}");
+            "^(?:(\\d+(?:\\.\\d+){1,5})(?:[、.\\s　]+|(?=[\\p{IsHan}]))"
+                    + "|(\\d+)[、.\\s　]+).{0,80}");
     private static final Pattern LEGAL_HEADING = Pattern.compile(
             "^第[〇零一二三四五六七八九十百千万0-9]+[章节篇条].{0,80}");
     private static final Pattern CHINESE_NUMBERED_HEADING = Pattern.compile(
@@ -59,7 +60,8 @@ final class DocumentTextNormalizer {
         }
         Matcher arabic = ARABIC_NUMBERED_HEADING.matcher(value);
         if (arabic.matches()) {
-            int level = 1 + (int) arabic.group(1).chars().filter(character -> character == '.').count();
+            String numbering = arabic.group(1) != null ? arabic.group(1) : arabic.group(2);
+            int level = 1 + (int) numbering.chars().filter(character -> character == '.').count();
             return clampHeadingLevel(level);
         }
         return CHINESE_NUMBERED_HEADING.matcher(value).matches() ? 2 : 0;
