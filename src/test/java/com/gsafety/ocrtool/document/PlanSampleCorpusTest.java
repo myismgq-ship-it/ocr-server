@@ -63,6 +63,7 @@ class PlanSampleCorpusTest {
         assertNationalEarthquake(roots);
         assertHexiEarthquake(roots);
         assertTianjinForestFire(roots);
+        assertDatangEmergencyPlan(roots);
         assertTraditionalDoc(roots);
         assertMhtml(roots);
         assertNonPlan(roots);
@@ -146,6 +147,22 @@ class PlanSampleCorpusTest {
         assertThat(document.fileType()).isEqualTo(DocumentFileType.DOC);
         assertThat(segmenter.extract(document).emergencyResponses())
                 .anySatisfy(level -> assertThat(level.status()).isNotEqualTo("MISSING"));
+    }
+
+    private void assertDatangEmergencyPlan(List<Path> roots) throws Exception {
+        Path sample = find(roots, "中国大唐集团公司突发事件.docx").orElse(null);
+        if (sample == null) {
+            return;
+        }
+        SegmentResult result = segmenter.extract(parse(sample));
+        String[] required = {"死亡10人", "死亡3-9人", "人身死亡或重伤", "重伤或轻伤"};
+        for (int index = 0; index < required.length; index++) {
+            assertThat(result.emergencyResponses().get(index).activationConditions())
+                    .contains(required[index])
+                    .doesNotContain("应急响应一般分为", "组织实施");
+        }
+        assertThat(result.emergencyResponses().get(0).activationConditions()).doesNotContain("死亡3-9人");
+        assertThat(result.emergencyResponses().get(1).activationConditions()).doesNotContain("死亡10人");
     }
 
     private void assertMhtml(List<Path> roots) throws Exception {

@@ -179,6 +179,30 @@ class PlanSegmentServiceTest {
     }
 
     @Test
+    void explicitInlineConditionsOverrideGenericFourLevelOverview() {
+        ParsedDocument document = new ParsedDocument("plan.docx", DocumentFileType.DOCX, DocumentParseMode.WORD, List.of(
+                block("响应分级", 1, 2),
+                block("按事件严重程度，应急响应一般分为特别重大（Ⅰ级响应）、重大（Ⅱ级响应）、较大（Ⅲ级响应）、一般（Ⅳ级响应）四级。", 1, 0),
+                block("Ⅰ级和Ⅱ级应急响应由集团组织实施，Ⅲ级和Ⅳ级应急响应由所属企业组织实施。", 1, 0),
+                block("出现下列情况时启动Ⅰ级响应：造成或可能造成一次死亡10人及以上事故。", 1, 0),
+                block("出现下列情况时启动Ⅱ级响应：造成或可能造成一次死亡3至9人事故。", 1, 0),
+                block("出现下列情况时启动Ⅲ级响应：造成或可能造成人身死亡或重伤。", 1, 0),
+                block("出现下列情况时启动Ⅳ级响应：造成或可能造成人身重伤或轻伤。", 1, 0)
+        ), List.of());
+
+        SegmentResult result = service.extract(document);
+
+        assertThat(result.emergencyResponses().get(0).activationConditions())
+                .contains("死亡10人").doesNotContain("应急响应一般分为", "死亡3至9人");
+        assertThat(result.emergencyResponses().get(1).activationConditions())
+                .contains("死亡3至9人").doesNotContain("应急响应一般分为", "死亡10人");
+        assertThat(result.emergencyResponses().get(2).activationConditions())
+                .contains("人身死亡或重伤").doesNotContain("应急响应一般分为", "重伤或轻伤");
+        assertThat(result.emergencyResponses().get(3).activationConditions())
+                .contains("重伤或轻伤").doesNotContain("应急响应一般分为", "人身死亡或重伤");
+    }
+
+    @Test
     void extractsActivationConditionsFromSidewaysResponseTableColumns() {
         ParsedDocument document = new ParsedDocument("plan.pdf", DocumentFileType.PDF, DocumentParseMode.OCR, List.of(
                 table("四级响应"),

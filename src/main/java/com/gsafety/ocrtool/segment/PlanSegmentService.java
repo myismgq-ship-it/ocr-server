@@ -40,6 +40,8 @@ public class PlanSegmentService {
             Pattern.CASE_INSENSITIVE);
     private static final Pattern EXPLICIT_RESPONSE_TARGET_PATTERN = Pattern.compile(
             "(?:启动|实施|进入|发布).{0,40}?(?:响应|预警)");
+    private static final Pattern RESPONSE_LEVEL_MENTION_PATTERN = Pattern.compile(
+            "(?:IV|III|II|(?<!I)I(?!I)|[一二三四1-4])级(?:应急)?响应");
     private static final int MAX_LEVEL_WINDOW_BLOCKS = 80;
     private static final int MAX_FIELD_CHARS = 8_000;
 
@@ -264,7 +266,8 @@ public class PlanSegmentService {
                 // 预案常把启动条件直接写成“符合……时，启动一级响应”，没有独立的
                 // “一级响应”标题。此类正文是有效条件证据，不能按普通级别引用丢弃。
                 if (explicitActivation
-                        && (contextKind(category, i, blocks, rules) == ContentKind.CONDITION
+                        && (isDirectActivationDefinition(block.text())
+                        || contextKind(category, i, blocks, rules) == ContentKind.CONDITION
                         || containsMultipleLevelDefinitions(block.text(), definitions))
                         && !hasNearbyLevelAnchor(i, blocks, definition)
                         && !isResponseLifecycleReference(block.text())) {
@@ -924,6 +927,32 @@ public class PlanSegmentService {
                 && text.matches(".*(启动|实施|进入|发布).{0,30}(响应|预警).*");
     }
 
+    /** “出现下列情况时启动某级响应：……”是自包含条件定义，不依赖章节标记。 */
+    private boolean isDirectActivationDefinition(String text) {
+        String value = normalize(text);
+        return value.matches("^(?:出现|符合|达到).{0,30}(?:情况|情形|条件|标准).{0,20}"
+                + "(?:时|之一).{0,20}(?:启动|实施|进入).{0,20}(?:响应|预警).{2,}");
+    }
+
+    /** 多级响应划分和实施主体说明只能兜底，不能覆盖明确启动条件。 */
+    private boolean isGenericResponseLevelOverview(String text) {
+        String value = normalize(text);
+        if (isExplicitActivationCondition(value)) {
+            return false;
+        }
+        int mentions = 0;
+        Matcher matcher = RESPONSE_LEVEL_MENTION_PATTERN.matcher(value);
+        while (matcher.find()) {
+            mentions++;
+        }
+        return mentions >= 2 && (value.contains("响应一般分为")
+                || value.contains("响应分为")
+                || value.contains("响应划分为")
+                || value.contains("响应级别为")
+                || value.contains("组织实施")
+                || value.contains("负责实施"));
+    }
+
     /** 优先使用“启动/进入某级响应”中的目标等级，排除“在其他级响应基础上”等来源引用。 */
     private Set<String> explicitActivationTargets(String text, List<LevelDefinition> definitions) {
         Set<String> targets = new LinkedHashSet<>();
@@ -1545,11 +1574,13 @@ public class PlanSegmentService {
 
         private final LevelDefinition definition;
         private final List<String> structuredConditions = new ArrayList<>();
+        private final List<String> explicitConditions = new ArrayList<>();
         private final List<String> semanticConditions = new ArrayList<>();
         private final List<String> classificationConditions = new ArrayList<>();
         private final List<String> structuredMeasures = new ArrayList<>();
         private final List<String> semanticMeasures = new ArrayList<>();
         private final Set<Integer> structuredConditionPages = new LinkedHashSet<>();
+        private final Set<Integer> explicitConditionPages = new LinkedHashSet<>();
         private final Set<Integer> semanticConditionPages = new LinkedHashSet<>();
         private final Set<Integer> classificationConditionPages = new LinkedHashSet<>();
         private final Set<Integer> structuredMeasurePages = new LinkedHashSet<>();
@@ -1594,9 +1625,9 @@ public class PlanSegmentService {
             if (title == null) {
                 title = definition.level();
             }
-            addParagraphs(structuredConditions, block.text());
+            addParagraphs(explicitConditions, block.text());
             if (block.page() > 0) {
-                structuredConditionPages.add(block.page());
+                explicitConditionPages.add(block.page());
             }
             if (evidence.size() < 5 && !evidence.contains(block.text())) {
                 evidence.add(block.text());
@@ -1642,6 +1673,21 @@ public class PlanSegmentService {
         }
 
         private List<String> selectedConditions() {
+            List<String> highConfidence = new ArrayList<>();
+            structuredConditions.stream()
+                    .filter(condition -> !isGenericResponseLevelOverview(condition))
+                    .forEach(condition -> addParagraphs(highConfidence, condition));
+            explicitConditions.forEach(condition -> addParagraphs(highConfidence, condition));
+            if (!highConfidence.isEmpty()) {
+                return highConfidence;
+            }
+            List<String> semantic = new ArrayList<>();
+            semanticConditions.stream()
+                    .filter(condition -> !isGenericResponseLevelOverview(condition))
+                    .forEach(condition -> addParagraphs(semantic, condition));
+            if (!semantic.isEmpty()) {
+                return semantic;
+            }
             if (!structuredConditions.isEmpty()) {
                 return structuredConditions;
             }
@@ -1656,8 +1702,13 @@ public class PlanSegmentService {
         }
 
         private Set<Integer> selectedConditionPages() {
-            if (!structuredConditions.isEmpty()) {
-                return structuredConditionPages;
+            boolean highConfidence = structuredConditions.stream()
+                    .anyMatch(condition -> !isGenericResponseLevelOverview(condition))
+                    || !explicitConditions.isEmpty();
+            if (highConfidence) {
+                Set<Integer> pages = new LinkedHashSet<>(structuredConditionPages);
+                pages.addAll(explicitConditionPages);
+                return pages;
             }
             if (!semanticConditions.isEmpty()) {
                 return semanticConditionPages;
