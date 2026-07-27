@@ -12,6 +12,8 @@ import org.apache.poi.hwpf.extractor.WordExtractor;
 import org.apache.poi.xwpf.usermodel.IBodyElement;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.apache.poi.xwpf.usermodel.XWPFParagraph;
+import org.apache.poi.xwpf.usermodel.XWPFStyle;
+import org.apache.poi.xwpf.usermodel.XWPFStyles;
 import org.apache.poi.xwpf.usermodel.XWPFTable;
 import org.apache.poi.xwpf.usermodel.XWPFTableCell;
 import org.apache.poi.xwpf.usermodel.XWPFTableRow;
@@ -50,7 +52,7 @@ public class WordDocumentParser implements DocumentParser {
         List<DocumentBlock> blocks = new ArrayList<>();
         try (InputStream in = java.nio.file.Files.newInputStream(document.path());
              XWPFDocument doc = new XWPFDocument(in)) {
-            addBodyElements(blocks, doc.getBodyElements());
+            addBodyElements(blocks, doc.getBodyElements(), doc.getStyles());
         }
         return new ParsedDocument(
                 document.fileName(),
@@ -77,12 +79,13 @@ public class WordDocumentParser implements DocumentParser {
                 List.of("DOC 格式只能保留基础段落文本，复杂表格结构可能不完整。"));
     }
 
-    private void addBodyElements(List<DocumentBlock> blocks, List<IBodyElement> elements) {
+    private void addBodyElements(
+            List<DocumentBlock> blocks, List<IBodyElement> elements, XWPFStyles styles) {
         for (IBodyElement element : elements) {
             if (element instanceof XWPFParagraph paragraph) {
-                addParagraph(blocks, paragraph.getText(), headingLevel(paragraph));
+                addParagraph(blocks, paragraph.getText(), headingLevel(paragraph, styles));
             } else if (element instanceof XWPFTable table) {
-                addTable(blocks, table);
+                addTable(blocks, table, styles);
             }
         }
     }
@@ -98,11 +101,11 @@ public class WordDocumentParser implements DocumentParser {
         }
     }
 
-    private void addTable(List<DocumentBlock> blocks, XWPFTable table) {
+    private void addTable(List<DocumentBlock> blocks, XWPFTable table, XWPFStyles styles) {
         if (isLayoutTable(table)) {
             for (XWPFTableRow row : table.getRows()) {
                 for (XWPFTableCell cell : row.getTableCells()) {
-                    addBodyElements(blocks, cell.getBodyElements());
+                    addBodyElements(blocks, cell.getBodyElements(), styles);
                 }
             }
             return;
@@ -151,10 +154,18 @@ public class WordDocumentParser implements DocumentParser {
         return String.join("\n", fragments);
     }
 
-    private int headingLevel(XWPFParagraph paragraph) {
-        String style = paragraph.getStyle();
-        if (StringUtils.hasText(style)) {
-            Matcher matcher = Pattern.compile("(?:Heading|标题)\\s*(\\d+)").matcher(style);
+    private int headingLevel(XWPFParagraph paragraph, XWPFStyles styles) {
+        String styleId = paragraph.getStyle();
+        if (StringUtils.hasText(styleId)) {
+            String styleName = styleId;
+            if (styles != null) {
+                XWPFStyle style = styles.getStyle(styleId);
+                if (style != null && StringUtils.hasText(style.getName())) {
+                    styleName = style.getName();
+                }
+            }
+            Matcher matcher = Pattern.compile("(?:Heading|标题)\\s*(\\d+)", Pattern.CASE_INSENSITIVE)
+                    .matcher(styleName);
             if (matcher.find()) {
                 return DocumentTextNormalizer.clampHeadingLevel(Integer.parseInt(matcher.group(1)));
             }

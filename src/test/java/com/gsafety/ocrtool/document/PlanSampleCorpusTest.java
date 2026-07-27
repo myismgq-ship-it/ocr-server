@@ -97,7 +97,11 @@ class PlanSampleCorpusTest {
     }
 
     private void assertTianjinForestFire(List<Path> roots) throws Exception {
-        Path sample = find(roots, "天津市森林火灾应急预案.docx").orElse(null);
+        Optional<Path> samplePath = find(roots, "天津市森林火灾应急预案.docx");
+        if (samplePath.isEmpty()) {
+            samplePath = find(roots, "天津市森林火灾应急预案(1).docx");
+        }
+        Path sample = samplePath.orElse(null);
         if (sample == null) {
             return;
         }
@@ -111,6 +115,24 @@ class PlanSampleCorpusTest {
         assertThat(result.emergencyResponses().get(1).activationConditions()).contains("24小时");
         assertThat(result.emergencyResponses().get(2).activationConditions()).contains("12小时");
         assertThat(result.emergencyResponses().get(3).activationConditions()).contains("4小时");
+        ResponseLevelSegment red = result.warningResponses().get(0);
+        ResponseLevelSegment orange = result.warningResponses().get(1);
+        ResponseLevelSegment yellow = result.warningResponses().get(2);
+        ResponseLevelSegment blue = result.warningResponses().get(3);
+        assertThat(red.activationConditions()).contains("橙色、红色");
+        assertThat(orange.activationConditions()).contains("橙色、红色");
+        assertThat(yellow.activationConditions()).contains("蓝色、黄色");
+        assertThat(blue.activationConditions()).contains("蓝色、黄色");
+        assertThat(red.responseMeasures()).contains("加强森林防火巡护", "进一步加强野外火源管理");
+        assertThat(orange.responseMeasures()).contains("加强森林防火巡护", "进一步加强野外火源管理");
+        assertThat(yellow.responseMeasures()).contains("加强森林防火巡护")
+                .doesNotContain("进一步加强野外火源管理");
+        assertThat(blue.responseMeasures()).contains("加强森林防火巡护")
+                .doesNotContain("进一步加强野外火源管理");
+        assertThat(result.warningResponses()).allSatisfy(level -> {
+            assertThat(level.activationConditions()).doesNotContain("信息报告", "应急响应");
+            assertThat(level.responseMeasures()).doesNotContain("扑救火灾", "转移安置人员");
+        });
         assertThat(result.commandSystem()).isNotNull();
         assertThat(result.commandSystem().title()).doesNotContain("框架图");
     }

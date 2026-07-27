@@ -240,9 +240,12 @@ public class PlanSegmentService {
                 continue;
             }
             boolean explicitActivation = isExplicitActivationCondition(block.text());
-            Set<String> explicitTargets = explicitActivation
-                    ? explicitActivationTargets(block.text(), definitions)
+            Set<String> warningTargets = "WARNING".equals(category)
+                    ? groupedWarningResponseTargets(block.text(), definitions)
                     : Set.of();
+            Set<String> explicitTargets = !warningTargets.isEmpty()
+                    ? warningTargets
+                    : explicitActivation ? explicitActivationTargets(block.text(), definitions) : Set.of();
             for (LevelDefinition definition : definitions) {
                 if (!isCategoryCompatible(category, i, blocks)) {
                     continue;
@@ -271,7 +274,7 @@ public class PlanSegmentService {
                 if (!isPrimaryLevelMention(block, definition, definitions)) {
                     continue;
                 }
-                int end = findLevelWindowEnd(i, blocks, definitions, rules);
+                int end = findLevelWindowEnd(category, i, blocks, definitions, rules);
                 CandidateParts parts = classifyLevelWindow(category, i, end, blocks, rules);
                 String title = containsGroupedLevelMention(block.text(), definition, definitions)
                         ? definition.level()
@@ -428,6 +431,12 @@ public class PlanSegmentService {
             return true;
         }
         if (containsGroupedLevelMention(block.text(), current, definitions)) {
+            if (current.key().startsWith("warning_")
+                    && !block.heading()
+                    && !block.table()
+                    && !isGroupedWarningResponseUnit(block.text())) {
+                return false;
+            }
             return true;
         }
         String text = stripSectionNumber(normalize(block.text()));
@@ -542,8 +551,15 @@ public class PlanSegmentService {
     }
 
     private int findLevelWindowEnd(
-            int start, List<DocumentBlock> blocks, List<LevelDefinition> definitions, SegmentRules rules) {
+            String category,
+            int start,
+            List<DocumentBlock> blocks,
+            List<LevelDefinition> definitions,
+            SegmentRules rules) {
         int anchorLevel = blocks.get(start).headingLevel();
+        if (anchorLevel <= 0) {
+            anchorLevel = enclosingHeadingLevel(start, blocks);
+        }
         int limit = Math.min(blocks.size(), start + MAX_LEVEL_WINDOW_BLOCKS);
         int characters = 0;
         for (int i = start + 1; i < limit; i++) {
@@ -553,6 +569,12 @@ public class PlanSegmentService {
                 return i;
             }
             if (blocks.get(start).table() && !block.table()) {
+                return i;
+            }
+            if ("WARNING".equals(category)
+                    && isGroupedWarningResponseUnit(block.text())
+                    && (!groupedWarningResponseTargets(block.text(), definitions).isEmpty()
+                    || containsMultipleLevelDefinitions(block.text(), definitions))) {
                 return i;
             }
             boolean levelHeading = matchesAnyLevel(block.text(), definitions)
@@ -567,6 +589,39 @@ public class PlanSegmentService {
             }
         }
         return limit;
+    }
+
+    private int enclosingHeadingLevel(int start, List<DocumentBlock> blocks) {
+        for (int i = start - 1; i >= Math.max(0, start - 12); i--) {
+            if (blocks.get(i).headingLevel() > 0) {
+                return blocks.get(i).headingLevel();
+            }
+        }
+        return 0;
+    }
+
+    /** 组合颜色正文只有明确表达“发布预警后采取行动”时才是预警响应单元。 */
+    private boolean isGroupedWarningResponseUnit(String text) {
+        String value = normalize(text);
+        return value.matches("^(?:当)?发布.{1,40}预警(?:信息)?(?:后|时).+")
+                || value.matches(".*预警响应(?:措施|行动|程序).+");
+    }
+
+    /** 句首触发颜色是目标等级，后文“在蓝黄基础上”只用于措施继承。 */
+    private Set<String> groupedWarningResponseTargets(
+            String text, List<LevelDefinition> definitions) {
+        Matcher matcher = Pattern.compile("^((?:当)?发布.{1,80}?预警(?:信息)?(?:后|时))")
+                .matcher(text.trim());
+        if (!matcher.find()) {
+            return Set.of();
+        }
+        Set<String> targets = new LinkedHashSet<>();
+        for (LevelDefinition definition : definitions) {
+            if (matchesLevelDefinition(matcher.group(1), definition)) {
+                targets.add(definition.key());
+            }
+        }
+        return Set.copyOf(targets);
     }
 
     private boolean isConditionLevelContinuation(int index, List<DocumentBlock> blocks) {
@@ -637,6 +692,16 @@ public class PlanSegmentService {
                     || text.length() <= 30 && !text.matches(".*[。；;].*"))) {
                 continue;
             }
+            InlineContentParts warningParts = "WARNING".equals(category)
+                    ? splitWarningTriggerAndMeasure(block)
+                    : null;
+            if (warningParts != null) {
+                structuredConditions.add(warningParts.condition());
+                structuredMeasures.add(warningParts.measure());
+                kind = ContentKind.MEASURE;
+                structuredRole = true;
+                continue;
+            }
             InlineContentParts inlineParts = splitInlineConditionAndMeasure(block);
             if (inlineParts != null) {
                 // “出现重大状态时启动二级响应，指挥部立即采取……”在同一段中同时
@@ -696,6 +761,19 @@ public class PlanSegmentService {
                 pages(structuredMeasures),
                 pages(semanticConditions),
                 pages(semanticMeasures));
+    }
+
+    /** 将“当发布蓝色、黄色预警信息后，……”拆成触发条件和对应措施。 */
+    private InlineContentParts splitWarningTriggerAndMeasure(DocumentBlock block) {
+        Matcher matcher = Pattern.compile(
+                        "^((?:当)?发布.{1,80}?预警(?:信息)?(?:后|时))[，,：:](.+)$")
+                .matcher(block.text().trim());
+        if (!matcher.matches() || !StringUtils.hasText(matcher.group(2))) {
+            return null;
+        }
+        return new InlineContentParts(
+                copyBlockWithText(block, matcher.group(1).trim()),
+                copyBlockWithText(block, matcher.group(2).trim()));
     }
 
     /** “符合条件后按以下程序启动响应”是响应流程入口，不是启动条件正文。 */
