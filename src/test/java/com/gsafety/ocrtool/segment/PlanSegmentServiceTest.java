@@ -179,6 +179,47 @@ class PlanSegmentServiceTest {
     }
 
     @Test
+    void keepsPublishedWarningThresholdsAsConditionsAndAppliesCommonProcedures() {
+        ParsedDocument document = new ParsedDocument(
+                "flood-warning-plan.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("5 防汛预警", 1, 1),
+                        block("5.1 预警分级", 1, 2),
+                        block("5.1.1 蓝色预警（Ⅳ级）", 1, 3),
+                        block("当符合下列条件之一时可发布蓝色预警。根据气象部门预报及监测信息：", 1, 0),
+                        block("预计未来24小时内全市出现降水。", 1, 0),
+                        block("未来1小时内降雨量达到10mm以上。", 1, 0),
+                        block("5.1.2 黄色预警（Ⅲ级）", 1, 3),
+                        block("当符合下列条件之一时可发布黄色预警。根据气象部门预报及监测信息：", 1, 0),
+                        block("预计未来12小时内全市出现强降水。", 1, 0),
+                        block("未来1小时内降雨量达到20mm以上。", 1, 0),
+                        block("5.2 预警信息的响应和发布", 1, 2),
+                        block("市防汛指挥部研判会商后发布预警信号并通知有关单位。", 1, 0),
+                        block("5.3 预警级别的变更", 1, 2),
+                        block("根据汛情变化调整预警级别。", 1, 0)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        ResponseLevelSegment yellow = result.warningResponses().get(2);
+        ResponseLevelSegment blue = result.warningResponses().get(3);
+        assertThat(yellow.activationConditions())
+                .contains("未来12小时", "20mm以上")
+                .doesNotContain("研判会商后发布");
+        assertThat(blue.activationConditions())
+                .contains("未来24小时", "10mm以上")
+                .doesNotContain("研判会商后发布");
+        assertThat(yellow.directResponseMeasures()).isNull();
+        assertThat(blue.directResponseMeasures()).isNull();
+        assertThat(yellow.responseMeasures()).contains("研判会商后发布预警信号");
+        assertThat(blue.responseMeasures()).contains("研判会商后发布预警信号");
+        assertThat(yellow.status()).isEqualTo("EXTRACTED");
+        assertThat(blue.status()).isEqualTo("EXTRACTED");
+    }
+
+    @Test
     void explicitInlineConditionsOverrideGenericFourLevelOverview() {
         ParsedDocument document = new ParsedDocument("plan.docx", DocumentFileType.DOCX, DocumentParseMode.WORD, List.of(
                 block("响应分级", 1, 2),
@@ -441,6 +482,59 @@ class PlanSegmentServiceTest {
     }
 
     @Test
+    void extractsNestedDisasterLossConditionsAndPrefersFormalResponseMeasures() {
+        ParsedDocument document = new ParsedDocument(
+                "natural-disaster-relief-plan.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("6 应急响应", 1, 1),
+                        block("6.1 Ⅰ级响应", 1, 2),
+                        block("6.1.1 灾害损失情况", 1, 3),
+                        block("1、因灾死亡20人以上。", 1, 1),
+                        block("因灾紧急转移安置受灾群众3万人以上。", 1, 0),
+                        block("6.1.2 启动程序", 1, 3),
+                        block("由市人民政府决定进入Ⅰ级响应。", 1, 0),
+                        block("6.1.3 应急响应", 1, 3),
+                        block("组织一级救灾力量开展救助。", 1, 0),
+                        block("6.1.4 响应终止", 1, 3),
+                        block("由市人民政府决定终止Ⅰ级响应。", 1, 0),
+                        block("6.2 Ⅱ级响应", 1, 2),
+                        block("6.2.1 灾害损失情况", 1, 3),
+                        block("1、因灾死亡10人以上，20人以下。", 1, 1),
+                        block("6.2.2 启动程序", 1, 3),
+                        block("由总指挥决定进入Ⅱ级响应。", 1, 0),
+                        block("6.2.3 响应措施", 1, 3),
+                        block("组织二级救灾力量开展救助。", 1, 0),
+                        block("6.2.4 响应终止", 1, 3),
+                        block("7 灾后救助与恢复重建", 2, 1),
+                        block("7.2.7 应急指挥部与有关部门协商，共同制定优惠政策。", 2, 3),
+                        block("7.2.8 卫生部门做好灾后疾病预防工作。", 2, 3)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+        ResponseLevelSegment level1 = result.emergencyResponses().get(0);
+        ResponseLevelSegment level2 = result.emergencyResponses().get(1);
+
+        assertThat(level1.activationConditions())
+                .contains("死亡20人以上", "3万人以上")
+                .doesNotContain("死亡10人以上", "启动程序", "灾害损失情况");
+        assertThat(level2.activationConditions())
+                .contains("死亡10人以上，20人以下")
+                .doesNotContain("死亡20人以上", "启动程序", "灾害损失情况");
+        assertThat(level1.directResponseMeasures())
+                .contains("组织一级救灾力量")
+                .doesNotContain("决定进入", "响应终止", "共同制定", "灾后疾病预防");
+        assertThat(level2.directResponseMeasures())
+                .contains("组织二级救灾力量")
+                .doesNotContain("决定进入", "响应终止", "共同制定", "灾后疾病预防");
+        assertThat(level1.status()).isEqualTo("EXTRACTED");
+        assertThat(level2.status()).isEqualTo("EXTRACTED");
+        assertThat(result.emergencyResponses().subList(2, 4))
+                .allSatisfy(level -> assertThat(level.status()).isEqualTo("MISSING"));
+    }
+
+    @Test
     void splitsInlineActivationConditionAndMeasure() {
         ParsedDocument document = new ParsedDocument(
                 "grain-plan.docx",
@@ -573,6 +667,263 @@ class PlanSegmentServiceTest {
         assertThat(result.emergencyResponses().get(1).directResponseMeasures()).contains("省级有关部门");
         assertThat(result.emergencyResponses().get(2).status()).isEqualTo("MISSING");
         assertThat(result.emergencyResponses().get(3).status()).isEqualTo("MISSING");
+    }
+
+    @Test
+    void mapsBareRomanLevelsFromSeparateDisasterClassificationSection() {
+        ParsedDocument document = new ParsedDocument(
+                "geological-disaster-plan.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("四、地质灾害险情与灾情分级", 1, 2),
+                        block("（一）特大型地质灾害险情与灾情（I级）", 1, 3),
+                        block("需搬迁转移人数在1000人以上或者潜在经济损失在1亿元以上。", 1, 0),
+                        block("一级公路中断不作为新的响应等级标题。", 1, 0),
+                        block("因灾死亡30人以上。", 1, 0),
+                        block("（二）大型地质灾害险情与灾情（Ⅱ级）", 1, 3),
+                        block("需搬迁转移人数在500人以上、1000人以下。", 1, 0),
+                        block("因灾死亡10人以上、30人以下。", 1, 0),
+                        block("（三）中型地质灾害险情与灾情（III级）", 1, 3),
+                        block("需搬迁转移人数在100人以上、500人以下。", 1, 0),
+                        block("因灾死亡3人以上、10人以下。", 1, 0),
+                        block("（四）小型地质灾害险情与灾情（四级）", 1, 3),
+                        block("需搬迁转移人数在100人以下。", 1, 0),
+                        block("因灾死亡3人以下。", 1, 0),
+                        block("五、应急响应", 2, 2),
+                        block("1. 特大型地质灾害的应急响应（I级）", 2, 3),
+                        block("组织一级应急救援。", 2, 0),
+                        block("2. 大型地质灾害的应急响应（Ⅱ级）", 2, 3),
+                        block("组织二级应急救援。", 2, 0),
+                        block("3. 中型地质灾害的应急响应（III级）", 2, 3),
+                        block("组织三级应急救援。", 2, 0),
+                        block("4. 小型地质灾害的应急响应（四级）", 2, 3),
+                        block("组织四级应急救援。", 2, 0),
+                        block("应急响应结束", 3, 2)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        String[] conditions = {"1000人以上", "500人以上", "100人以上", "100人以下"};
+        String[] measures = {"组织一级应急救援", "组织二级应急救援", "组织三级应急救援", "组织四级应急救援"};
+        for (int index = 0; index < conditions.length; index++) {
+            ResponseLevelSegment level = result.emergencyResponses().get(index);
+            assertThat(level.activationConditions()).contains(conditions[index]);
+            assertThat(level.directResponseMeasures()).contains(measures[index]);
+            assertThat(level.status()).isEqualTo("EXTRACTED");
+        }
+        assertThat(result.emergencyResponses().get(0).activationConditions()).contains("因灾死亡30人以上");
+        assertThat(result.emergencyResponses().get(0).activationConditions()).doesNotContain("500人以上");
+        assertThat(result.emergencyResponses().get(3).activationConditions()).doesNotContain("应急响应");
+    }
+
+    @Test
+    void linksGenericEventClassificationThroughExplicitResponseBridge() {
+        ParsedDocument document = new ParsedDocument(
+                "generic-event-bridge.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("4 事件与灾害分级", 1, 1),
+                        block("4.1 红区森林火灾", 1, 2),
+                        block("受害森林面积达到500公顷以上。", 1, 0),
+                        block("4.2 警戒洪涝灾害", 1, 2),
+                        block("主要河流流量超过警戒流量。", 1, 0),
+                        block("4.3 A类生产安全事故", 1, 2),
+                        block("事故造成十人以上人员受伤。", 1, 0),
+                        block("4.4 严重公共卫生事件", 1, 2),
+                        block("疫情波及两个以上行政区域。", 1, 0),
+                        block("5 应急响应", 2, 1),
+                        block("应对红区森林火灾，启动Ⅲ级响应。", 2, 2),
+                        block("组织森林消防力量开展扑救。", 2, 0),
+                        block("针对警戒洪涝灾害，启动Ⅰ级响应。", 2, 2),
+                        block("调度防汛抢险力量。", 2, 0),
+                        block("处置A类生产安全事故，启动Ⅱ级响应。", 2, 2),
+                        block("组织事故现场救援。", 2, 0),
+                        block("应对严重公共卫生事件，启动(Ⅳ)级响应。", 2, 2),
+                        block("组织医疗卫生救援。", 2, 0),
+                        block("响应终止", 3, 1)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        assertThat(result.emergencyResponses().get(0).activationConditions()).contains("警戒流量");
+        assertThat(result.emergencyResponses().get(1).activationConditions()).contains("十人以上人员受伤");
+        assertThat(result.emergencyResponses().get(2).activationConditions()).contains("500公顷以上");
+        assertThat(result.emergencyResponses().get(3).activationConditions()).contains("两个以上行政区域");
+        assertThat(result.emergencyResponses().get(0).directResponseMeasures()).contains("防汛抢险力量");
+        assertThat(result.emergencyResponses().get(3).directResponseMeasures()).contains("医疗卫生救援");
+        assertThat(result.emergencyResponses()).allSatisfy(level ->
+                assertThat(level.status()).isEqualTo("EXTRACTED"));
+    }
+
+    @Test
+    void usesBridgeSentenceOnlyWhenNoConcreteClassificationExists() {
+        ParsedDocument document = new ParsedDocument(
+                "bridge-fallback.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("5 应急响应", 1, 1),
+                        block("应对区域性供水事件，启动(Ⅳ)级响应。", 1, 2),
+                        block("组织供水保障力量开展处置。", 1, 0),
+                        block("响应终止", 2, 1)),
+                List.of());
+
+        ResponseLevelSegment level4 = service.extract(document).emergencyResponses().get(3);
+
+        assertThat(level4.activationConditions()).isEqualTo("应对区域性供水事件，启动(Ⅳ)级响应");
+        assertThat(level4.directResponseMeasures()).contains("供水保障力量");
+        assertThat(level4.status()).isEqualTo("EXTRACTED");
+    }
+
+    @Test
+    void explicitConditionsOverrideBridgedClassificationAndAdjustmentDoesNotCreateLevels() {
+        ParsedDocument document = new ParsedDocument(
+                "bridge-priority.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("4 地震灾害分级", 1, 1),
+                        block("4.4 一般地震灾害", 1, 2),
+                        block("发生4.0级以上、5.0级以下地震。", 1, 0),
+                        block("5 应急响应", 2, 1),
+                        block("5.1 Ⅳ级响应", 2, 2),
+                        block("5.1.1 启动条件", 2, 3),
+                        block("监测烈度达到四级响应专项阈值。", 2, 0),
+                        block("5.1.2 响应措施", 2, 3),
+                        block("应对一般地震灾害，启动(Ⅳ)级响应。", 2, 0),
+                        block("必要时可启动(Ⅲ)级响应。", 2, 0),
+                        block("组织属地救援力量开展处置。", 2, 0),
+                        block("响应终止", 3, 1)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+        ResponseLevelSegment level4 = result.emergencyResponses().get(3);
+
+        assertThat(level4.activationConditions())
+                .contains("专项阈值")
+                .doesNotContain("4.0级以上", "应对一般地震灾害");
+        assertThat(level4.directResponseMeasures()).contains("组织属地救援力量");
+        assertThat(result.emergencyResponses().get(2).status()).isEqualTo("MISSING");
+    }
+
+    @Test
+    void linksInverseResponseDefinitionToInlineClassificationAndSeparatesActions() {
+        ParsedDocument document = new ParsedDocument(
+                "inverse-response-bridge.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("六、事件与灾害分级", 1, 1),
+                        block("（一）事件分级", 1, 2),
+                        block("1．红区森林火灾为一级，主要指受害森林面积达到500公顷以上。", 1, 0),
+                        block("2．A类生产安全事故为二级，主要指事故造成10人以上人员受伤。", 1, 0),
+                        block("3．严重公共卫生事件为三级，主要指疫情波及两个以上行政区域。", 1, 0),
+                        block("4．一般供水事件为四级，主要指供水中断超过12小时。", 1, 0),
+                        block("（二）分级响应程序", 2, 2),
+                        block("1．红区森林火灾应急响应为I级", 2, 2),
+                        block("发生红区森林火灾时，指挥部立即启动专项预案并部署扑救工作。", 2, 0),
+                        block("2．A类生产安全事故响应等级为Ⅱ级", 2, 2),
+                        block("发生A类生产安全事故时，指挥部立即启动事故预案并组织现场救援。", 2, 0),
+                        block("3．严重公共卫生事件应急响应为3级", 2, 2),
+                        block("发生严重公共卫生事件时，立即启动卫生应急系统并部署医疗救援。", 2, 0),
+                        block("4．一般供水事件应急响应为四级", 2, 2),
+                        block("发生一般供水事件时，立即启动供水保障预案并组织抢修。", 2, 0),
+                        block("响应终止", 3, 1)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        String[] conditions = {"500公顷以上", "10人以上人员受伤", "两个以上行政区域", "12小时"};
+        String[] measures = {"部署扑救工作", "组织现场救援", "部署医疗救援", "组织抢修"};
+        for (int index = 0; index < conditions.length; index++) {
+            ResponseLevelSegment level = result.emergencyResponses().get(index);
+            assertThat(level.activationConditions())
+                    .contains(conditions[index])
+                    .doesNotContain("立即启动", "部署", "组织现场救援");
+            assertThat(level.directResponseMeasures())
+                    .contains(measures[index])
+                    .doesNotContain("发生");
+            assertThat(level.status()).isEqualTo("EXTRACTED");
+        }
+    }
+
+    @Test
+    void prefersEventTriggerThenInverseDefinitionWhenClassificationIsMissing() {
+        ParsedDocument document = new ParsedDocument(
+                "inverse-response-fallback.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("5 应急响应", 1, 1),
+                        block("区域停水事件应急响应为二级", 1, 2),
+                        block("发生区域停水事件时，立即启动供水保障预案并部署抢修工作。", 1, 0),
+                        block("公共通信事件响应等级为Ⅳ级", 1, 2),
+                        block("通信保障队伍立即开展线路抢修。", 1, 0),
+                        block("必要时调整为Ⅰ级响应。", 1, 0),
+                        block("响应终止", 2, 1)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+        ResponseLevelSegment level2 = result.emergencyResponses().get(1);
+        ResponseLevelSegment level4 = result.emergencyResponses().get(3);
+
+        assertThat(level2.activationConditions()).isEqualTo("发生区域停水事件时");
+        assertThat(level2.directResponseMeasures())
+                .contains("立即启动供水保障预案", "部署抢修工作")
+                .doesNotContain("发生区域停水事件时");
+        assertThat(level4.activationConditions()).isEqualTo("公共通信事件响应等级为Ⅳ级");
+        assertThat(level4.directResponseMeasures()).contains("通信保障队伍");
+        assertThat(result.emergencyResponses().get(0).status()).isEqualTo("MISSING");
+    }
+
+    @Test
+    void doesNotMatchMajorClassificationToSpecialMajorSubstring() {
+        ParsedDocument document = new ParsedDocument(
+                "severity-substring.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("1 灾害分级", 1, 1),
+                        block("1．特别重大地质灾害为一级，主要指造成30人以上死亡。", 1, 0),
+                        block("2．重大地质灾害为二级，主要指造成10人以上、30人以下死亡。", 1, 0),
+                        block("2 应急响应", 2, 1),
+                        block("特别重大地质灾害应急响应为一级", 2, 2),
+                        block("发生特别重大地质灾害时，立即启动一级预案并部署救援。", 2, 0),
+                        block("重大地质灾害应急响应为二级", 2, 2),
+                        block("发生重大地质灾害时，立即启动二级预案并部署救援。", 2, 0),
+                        block("响应终止", 3, 1)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        assertThat(result.emergencyResponses().get(0).activationConditions())
+                .contains("30人以上死亡")
+                .doesNotContain("10人以上、30人以下");
+        assertThat(result.emergencyResponses().get(1).activationConditions())
+                .contains("10人以上、30人以下死亡")
+                .doesNotContain("30人以上死亡");
+    }
+
+    @Test
+    void bareClassificationLevelsDoNotCreateResponseStructure() {
+        ParsedDocument document = new ParsedDocument(
+                "classification-only.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("四、灾害险情与灾情分级", 1, 2),
+                        block("（一）特大型灾害（I级）", 1, 3),
+                        block("因灾死亡30人以上。", 1, 0),
+                        block("（二）大型灾害（Ⅱ级）", 1, 3),
+                        block("因灾死亡10人以上、30人以下。", 1, 0)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+
+        assertThat(result.emergencyResponses())
+                .allSatisfy(level -> assertThat(level.status()).isEqualTo("MISSING"));
     }
 
     @Test
@@ -763,10 +1114,70 @@ class PlanSegmentServiceTest {
 
         SegmentResult result = service.extract(document);
 
-        assertThat(result.emergencyResponses().get(0).directResponseMeasures()).contains("统一组织信息报告");
-        assertThat(result.emergencyResponses().get(1).directResponseMeasures()).contains("统一组织信息报告");
+        assertThat(result.emergencyResponses().get(0).directResponseMeasures()).isNull();
+        assertThat(result.emergencyResponses().get(1).directResponseMeasures()).isNull();
+        assertThat(result.emergencyResponses().get(0).responseMeasures()).contains("统一组织信息报告");
+        assertThat(result.emergencyResponses().get(1).responseMeasures()).contains("统一组织信息报告");
         assertThat(result.emergencyResponses().get(2).status()).isEqualTo("MISSING");
         assertThat(result.emergencyResponses().get(3).status()).isEqualTo("MISSING");
+    }
+
+    @Test
+    void splitsDescriptiveMappingsAndKeepsCommonMeasuresOutOfDirectMeasures() {
+        ParsedDocument document = new ParsedDocument(
+                "descriptive-response.docx",
+                DocumentFileType.DOCX,
+                DocumentParseMode.WORD,
+                List.of(
+                        block("3 应急响应", 1, 1),
+                        block("3.1 响应级别", 1, 2),
+                        block("市级响应分为四级。发生特别重大突发事件时，市级启动一级应急响应；"
+                                + "发生重大突发事件时，市级启动一级或二级应急响应；"
+                                + "发生较大突发事件时，事发区启动本级响应，市级视情启动三级或四级应急响应。"
+                                + "发生一般突发事件时，事发区启动本级响应，市级视情提供支持。", 1, 0),
+                        block("3.2 指挥协调措施", 1, 2),
+                        block("（1）启动一级应急响应：", 1, 0),
+                        block("市指挥部组织一级协调行动。", 1, 0),
+                        block("（2）启动二级应急响应：", 1, 0),
+                        block("市指挥部组织二级协调行动。", 1, 0),
+                        block("（3）启动三级应急响应：", 1, 0),
+                        block("市指挥部组织三级协调行动。", 1, 0),
+                        block("（4）启动四级应急响应：", 1, 0),
+                        block("市指挥部组织四级协调行动。", 1, 0),
+                        block("3.3 处置措施", 1, 2),
+                        block("统一开展现场疏散、车辆调度和医学救援。", 1, 0),
+                        block("4 应急结束", 1, 1)),
+                List.of());
+
+        SegmentResult result = service.extract(document);
+        ResponseLevelSegment level1 = result.emergencyResponses().get(0);
+        ResponseLevelSegment level2 = result.emergencyResponses().get(1);
+        ResponseLevelSegment level3 = result.emergencyResponses().get(2);
+        ResponseLevelSegment level4 = result.emergencyResponses().get(3);
+
+        assertThat(level1.activationConditions())
+                .contains("发生特别重大突发事件", "发生重大突发事件")
+                .doesNotContain("发生较大突发事件", "发生一般突发事件");
+        assertThat(level2.activationConditions())
+                .contains("发生重大突发事件")
+                .doesNotContain("发生特别重大突发事件", "发生较大突发事件");
+        assertThat(level3.activationConditions()).contains("发生较大突发事件")
+                .doesNotContain("发生重大突发事件", "发生一般突发事件");
+        assertThat(level4.activationConditions()).contains("发生较大突发事件")
+                .doesNotContain("发生一般突发事件");
+
+        ResponseLevelSegment[] levels = {level1, level2, level3, level4};
+        for (int index = 0; index < levels.length; index++) {
+            String ownAction = "组织" + "一二三四".charAt(index) + "级协调行动";
+            assertThat(levels[index].directResponseMeasures())
+                    .contains(ownAction)
+                    .doesNotContain("统一开展现场疏散");
+            assertThat(levels[index].responseMeasures())
+                    .contains(ownAction, "统一开展现场疏散", "车辆调度", "医学救援");
+        }
+        assertThat(level1.directResponseMeasures()).doesNotContain("组织二级协调行动");
+        assertThat(level2.directResponseMeasures()).doesNotContain("组织三级协调行动");
+        assertThat(level3.directResponseMeasures()).doesNotContain("组织四级协调行动");
     }
 
     @Test

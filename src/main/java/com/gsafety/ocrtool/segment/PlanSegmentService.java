@@ -42,6 +42,28 @@ public class PlanSegmentService {
             "(?:启动|实施|进入|发布).{0,40}?(?:响应|预警)");
     private static final Pattern RESPONSE_LEVEL_MENTION_PATTERN = Pattern.compile(
             "(?:IV|III|II|(?<!I)I(?!I)|[一二三四1-4])级(?:应急)?响应");
+    private static final Pattern CLASSIFICATION_LEVEL_PATTERN = Pattern.compile(
+            "(IV|III|II|(?<!I)I(?!I)|[一二三四1-4])级");
+    private static final Pattern RESPONSE_BRIDGE_PATTERN = Pattern.compile(
+            "(?:应对|针对|处置)(.{2,80}?)(?:时)?[，,]?(?:启动|实施|进入)(.{0,40}?)(?:应急)?(?:响应|反应)");
+    private static final Pattern SOURCE_RESPONSE_BRIDGE_PATTERN = Pattern.compile(
+            "(?:应对|针对|处置).{2,80}?(?:启动|实施|进入).{0,40}?(?:应急)?(?:响应|反应)");
+    private static final Pattern INVERSE_RESPONSE_BRIDGE_PATTERN = Pattern.compile(
+            "(.{2,80}?)(?:应急)?(?:响应|反应)(?:等级)?为(?:第)?"
+                    + "(IV|III|II|(?<!I)I(?!I)|[一二三四1-4])级");
+    private static final Pattern SOURCE_INVERSE_RESPONSE_BRIDGE_PATTERN = Pattern.compile(
+            "[^。；;\\r\\n]{2,100}?(?:应急)?(?:响应|反应)(?:等级)?为(?:第)?[（(]?"
+                    + "(?:Ⅰ|Ⅱ|Ⅲ|Ⅳ|IV|III|II|I|[一二三四1-4])[）)]?级");
+    private static final Pattern DESCRIPTIVE_RESPONSE_BRIDGE_PATTERN = Pattern.compile(
+            "(?:初判)?发生(.{2,100}?)(?:时|后)[，,]?.{0,160}?"
+                    + "(?:启动|实施|进入).{0,60}?(?:应急)?(?:响应|反应)");
+    private static final Pattern SENTENCE_CLAUSE_PATTERN = Pattern.compile("[^。；;\\r\\n]+[。；;]?");
+    private static final Pattern CLASSIFICATION_DEFINITION_PATTERN = Pattern.compile(
+            "^(.{2,80}?)(?:划分为|确定为|为)(IV|III|II|(?<!I)I(?!I)|[一二三四1-4])级"
+                    + "(?:，|,)?(?:主要指|是指|包括|指)?.*");
+    private static final Pattern EVENT_TRIGGER_ACTION_PATTERN = Pattern.compile(
+            "^((?:当)?发生.{1,80}?(?:时|后))[，,](.+)$");
+    private static final int MAX_CLASSIFICATION_CONTEXT_BLOCKS = 40;
     private static final int MAX_LEVEL_WINDOW_BLOCKS = 80;
     private static final int MAX_FIELD_CHARS = 8_000;
 
@@ -233,6 +255,11 @@ public class PlanSegmentService {
         Map<String, List<DocumentBlock>> classificationFallbacks = new LinkedHashMap<>();
         definitions.forEach(definition -> levels.put(definition.key(), new MutableLevel(definition)));
         definitions.forEach(definition -> classificationFallbacks.put(definition.key(), new ArrayList<>()));
+        List<ResponseBridge> responseBridges = "EMERGENCY".equals(category)
+                ? findResponseBridges(blocks, definitions)
+                : List.of();
+        responseBridges.forEach(bridge -> bridge.targetKeys().forEach(key ->
+                levels.get(key).addBridgeEvidence(bridge.block())));
         for (int i = 0; i < blocks.size(); i++) {
             DocumentBlock block = blocks.get(i);
             if (isTocBlock(block) || isFlowchartContext(i, blocks)) {
@@ -248,13 +275,21 @@ public class PlanSegmentService {
             Set<String> explicitTargets = !warningTargets.isEmpty()
                     ? warningTargets
                     : explicitActivation ? explicitActivationTargets(block.text(), definitions) : Set.of();
+            if ("EMERGENCY".equals(category)
+                    && descriptiveResponseBridges(block, definitions).size() > 1) {
+                // 多个事件等级与响应等级写在同一段时，由分句桥接逐级归并，
+                // 不能再把整段作为每个等级的明确条件重复写入。
+                continue;
+            }
             for (LevelDefinition definition : definitions) {
-                if (!isCategoryCompatible(category, i, blocks)) {
-                    continue;
-                }
-                if (isClassificationCondition(category, i, blocks, definition)) {
+                // 事件/灾害分级常位于预警章节之后、应急响应章节之前，不能先用最近章节
+                // 类型过滤，否则跨章节启动条件会被误认为仍属于预警范围。
+                if (isClassificationCondition(category, i, blocks, definition, rules)) {
                     int end = findClassificationEnd(i, blocks, definitions, rules);
                     classificationFallbacks.get(definition.key()).addAll(blocks.subList(i, end));
+                    continue;
+                }
+                if (!isCategoryCompatible(category, i, blocks)) {
                     continue;
                 }
                 if (!matchesLevelDefinition(block.text(), definition)) {
@@ -285,9 +320,24 @@ public class PlanSegmentService {
                 levels.get(definition.key()).add(block, parts, title);
             }
         }
+        List<ClassificationSection> classificationSections = "EMERGENCY".equals(category)
+                ? findClassificationSections(blocks, rules)
+                : List.of();
         for (LevelDefinition definition : definitions) {
-            levels.get(definition.key())
-                    .addClassificationConditionBlocks(classificationFallbacks.get(definition.key()));
+            MutableLevel level = levels.get(definition.key());
+            responseBridges.stream()
+                    .filter(bridge -> bridge.targetKeys().contains(definition.key()))
+                    .forEach(bridge -> findBestClassificationSection(bridge, definition, classificationSections)
+                            .ifPresentOrElse(
+                                    section -> level.addBridgedClassificationConditionBlocks(section.blocks()),
+                                    () -> {
+                                        if (bridge.triggerBlock() != null) {
+                                            level.addTriggerCondition(bridge.triggerBlock());
+                                        } else {
+                                            level.addBridgeCondition(bridge.block());
+                                        }
+                                    }));
+            level.addClassificationConditionBlocks(classificationFallbacks.get(definition.key()));
         }
         applyCommonMeasures(category, levels, definitions, blocks, rules);
         applyMeasureInheritance(levels, definitions, rules);
@@ -340,29 +390,323 @@ public class PlanSegmentService {
             String category,
             int index,
             List<DocumentBlock> blocks,
-            LevelDefinition definition) {
-        if (!"EMERGENCY".equals(category)
-                || matchesLevelDefinition(blocks.get(index).text(), definition)
-                || !containsSeverity(blocks.get(index).text(), definition)) {
+            LevelDefinition definition,
+            SegmentRules rules) {
+        if (!"EMERGENCY".equals(category)) {
             return false;
         }
         String current = normalize(blocks.get(index).text());
-        if (current.contains("预警") || current.contains("措施") || current.contains("行动")
-                || countSeverityLevels(current) != 1) {
+        if (current.contains("预警") || current.contains("响应")
+                || current.contains("措施") || current.contains("行动")) {
             return false;
         }
-        for (int i = index; i >= Math.max(0, index - 10); i--) {
-            String text = normalize(blocks.get(i).text());
-            if ((text.contains("事件分级") || text.contains("事故分级") || text.contains("灾害分级")
-                    || text.contains("响应分级") || text.contains("分级标准") || text.contains("事件等级"))
-                    && !text.contains("预警")) {
+        int explicitOrdinal = classificationLevelOrdinal(current);
+        boolean explicitLevelMatch = explicitOrdinal == levelOrdinal(definition)
+                && isClassificationLevelAnchor(blocks.get(index));
+        boolean severityMatch = explicitOrdinal == 0
+                && countSeverityLevels(current) == 1
+                && containsSeverity(current, definition);
+        if (!explicitLevelMatch && !severityMatch) {
+            return false;
+        }
+        return hasEmergencyClassificationScope(index, blocks, rules);
+    }
+
+    private List<ResponseBridge> findResponseBridges(
+            List<DocumentBlock> blocks, List<LevelDefinition> definitions) {
+        List<ResponseBridge> bridges = new ArrayList<>();
+        for (int index = 0; index < blocks.size(); index++) {
+            DocumentBlock source = blocks.get(index);
+            if (!isCategoryCompatible("EMERGENCY", index, blocks)) {
+                continue;
+            }
+            Matcher sourceMatcher = SOURCE_RESPONSE_BRIDGE_PATTERN.matcher(source.text());
+            while (sourceMatcher.find()) {
+                String sourceClause = sourceMatcher.group();
+                Matcher matcher = RESPONSE_BRIDGE_PATTERN.matcher(normalize(sourceClause));
+                if (!matcher.find() || isResponseAdjustmentStatement(matcher.group())) {
+                    continue;
+                }
+                Set<String> targets = explicitActivationTargets(matcher.group(), definitions);
+                String subject = matcher.group(1).replaceAll("^[，,。；;]+|[，,。；;]+$", "");
+                if (targets.isEmpty() || subject.length() < 2) {
+                    continue;
+                }
+                bridges.add(new ResponseBridge(
+                        subject,
+                        targets,
+                        copyBlockWithText(source, sourceClause),
+                        findEventTriggerCondition(index, subject, blocks)));
+            }
+            Matcher inverseSourceMatcher = SOURCE_INVERSE_RESPONSE_BRIDGE_PATTERN.matcher(source.text());
+            while (inverseSourceMatcher.find()) {
+                String sourceClause = inverseSourceMatcher.group();
+                Matcher matcher = INVERSE_RESPONSE_BRIDGE_PATTERN.matcher(normalize(sourceClause));
+                if (!matcher.find() || isResponseAdjustmentStatement(matcher.group())) {
+                    continue;
+                }
+                String subject = stripSectionNumber(matcher.group(1))
+                        .replaceAll("^[，,。；;]+|[，,。；;]+$", "");
+                Set<String> targets = targetForOrdinal(levelTokenOrdinal(matcher.group(2)), definitions);
+                if (targets.isEmpty() || subject.length() < 2) {
+                    continue;
+                }
+                bridges.add(new ResponseBridge(
+                        subject,
+                        targets,
+                        copyBlockWithText(source, sourceClause),
+                        findEventTriggerCondition(index, subject, blocks)));
+            }
+            bridges.addAll(descriptiveResponseBridges(source, definitions));
+        }
+        return List.copyOf(bridges);
+    }
+
+    /**
+     * 拆分“发生重大事件时启动一级或二级响应”一类描述性映射。
+     *
+     * <p>这里允许带明确事件主语和目标等级的“视情启动”，但仍拒绝响应升级、
+     * 降级和调整语句。未写明目标等级的“启动本级响应”不会建立映射。</p>
+     */
+    private List<ResponseBridge> descriptiveResponseBridges(
+            DocumentBlock source, List<LevelDefinition> definitions) {
+        List<ResponseBridge> bridges = new ArrayList<>();
+        Matcher clauses = SENTENCE_CLAUSE_PATTERN.matcher(source.text());
+        while (clauses.find()) {
+            String clause = clauses.group().trim();
+            Matcher mapping = DESCRIPTIVE_RESPONSE_BRIDGE_PATTERN.matcher(normalize(clause));
+            if (!mapping.find() || isDescriptiveResponseAdjustment(clause)) {
+                continue;
+            }
+            // 同一分句可能先写“事发地启动本级响应”，再写市级明确目标；
+            // 因此目标必须从完整分句提取，不能停在第一个“响应”处。
+            Set<String> targets = explicitActivationTargets(clause, definitions);
+            String subject = mapping.group(1).replaceAll("^[，,。；;]+|[，,。；;]+$", "");
+            if (targets.isEmpty() || subject.length() < 2) {
+                continue;
+            }
+            bridges.add(new ResponseBridge(
+                    subject,
+                    targets,
+                    copyBlockWithText(source, clause),
+                    null));
+        }
+        return List.copyOf(bridges);
+    }
+
+    private boolean isDescriptiveResponseAdjustment(String text) {
+        String value = normalize(text);
+        return value.matches(".*(?:必要时|可启动|建议启动|升级|降级|调整为|调整至|"
+                + "提升至|提高至|降为|降低至|转为).*");
+    }
+
+    private Set<String> targetForOrdinal(int ordinal, List<LevelDefinition> definitions) {
+        if (ordinal <= 0) {
+            return Set.of();
+        }
+        return definitions.stream()
+                .filter(definition -> levelOrdinal(definition) == ordinal)
+                .map(LevelDefinition::key)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
+    private DocumentBlock findEventTriggerCondition(
+            int bridgeIndex, String subject, List<DocumentBlock> blocks) {
+        String normalizedSubject = normalize(subject);
+        for (int index = bridgeIndex + 1; index < Math.min(blocks.size(), bridgeIndex + 6); index++) {
+            DocumentBlock candidate = blocks.get(index);
+            if (isResponseLifecycleReference(candidate.text())
+                    || RESPONSE_BRIDGE_PATTERN.matcher(normalize(candidate.text())).find()
+                    || INVERSE_RESPONSE_BRIDGE_PATTERN.matcher(normalize(candidate.text())).find()) {
+                return null;
+            }
+            InlineContentParts parts = splitEventTriggerAndAction(candidate);
+            if (parts != null && normalize(parts.condition().text()).contains(normalizedSubject)) {
+                return parts.condition();
+            }
+        }
+        return null;
+    }
+
+    private boolean isResponseAdjustmentStatement(String text) {
+        String value = normalize(text);
+        return value.matches(".*(?:必要时|视情|可启动|建议启动|升级|降级|调整为|调整至|"
+                + "提升至|提高至|降为|降低至|转为).*");
+    }
+
+    private boolean isResponseBridgeStatement(
+            String text, LevelDefinition definition, List<LevelDefinition> definitions) {
+        Matcher matcher = RESPONSE_BRIDGE_PATTERN.matcher(normalize(text));
+        while (matcher.find()) {
+            if (!isResponseAdjustmentStatement(matcher.group())
+                    && explicitActivationTargets(matcher.group(), definitions).contains(definition.key())) {
                 return true;
             }
-            if (i < index && blocks.get(i).heading() && blocks.get(i).headingLevel() <= 2) {
-                break;
+        }
+        Matcher inverse = INVERSE_RESPONSE_BRIDGE_PATTERN.matcher(normalize(text));
+        while (inverse.find()) {
+            if (!isResponseAdjustmentStatement(inverse.group())
+                    && levelTokenOrdinal(inverse.group(2)) == levelOrdinal(definition)) {
+                return true;
             }
         }
         return false;
+    }
+
+    private List<ClassificationSection> findClassificationSections(
+            List<DocumentBlock> blocks, SegmentRules rules) {
+        List<ClassificationSection> sections = new ArrayList<>();
+        for (int index = 0; index < blocks.size(); index++) {
+            DocumentBlock block = blocks.get(index);
+            String value = normalize(block.text());
+            boolean inlineDefinition = isInlineClassificationDefinition(value);
+            if (value.contains("预警") || value.contains("响应")
+                    || (!block.heading() && !inlineDefinition)
+                    || isEmergencyClassificationScope(value, rules)
+                    || !hasEmergencyClassificationScope(index, blocks, rules)) {
+                continue;
+            }
+            boolean levelLabel = classificationLevelOrdinal(value) != 0 || countSeverityLevels(value) == 1;
+            // 分级章节下允许行业自定义分类名，例如“红区森林火灾”“A类状态”。
+            // 名称的真实性由后续桥接主语精确匹配保证，不在这里枚举灾种。
+            boolean namedEventLabel = value.length() <= 80 && !stripSectionNumber(value).isBlank();
+            if (!levelLabel && !namedEventLabel) {
+                continue;
+            }
+            int end = inlineDefinition
+                    ? index + 1
+                    : findSemanticClassificationEnd(index, blocks, rules);
+            sections.add(new ClassificationSection(value, List.copyOf(blocks.subList(index, end))));
+        }
+        return List.copyOf(sections);
+    }
+
+    private boolean isInlineClassificationDefinition(String text) {
+        return CLASSIFICATION_DEFINITION_PATTERN.matcher(stripSectionNumber(normalize(text))).matches();
+    }
+
+    private boolean hasEmergencyClassificationScope(
+            int index, List<DocumentBlock> blocks, SegmentRules rules) {
+        int anchorLevel = blocks.get(index).headingLevel();
+        for (int i = index; i >= Math.max(0, index - MAX_CLASSIFICATION_CONTEXT_BLOCKS); i--) {
+            DocumentBlock block = blocks.get(i);
+            if (isEmergencyClassificationScope(block.text(), rules)) {
+                return true;
+            }
+            if (i < index && anchorLevel > 0 && block.heading()
+                    && block.headingLevel() > 0 && block.headingLevel() < anchorLevel) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private int findSemanticClassificationEnd(
+            int start, List<DocumentBlock> blocks, SegmentRules rules) {
+        int anchorLevel = blocks.get(start).headingLevel();
+        int limit = Math.min(blocks.size(), start + 20);
+        int characters = 0;
+        for (int i = start + 1; i < limit; i++) {
+            DocumentBlock block = blocks.get(i);
+            characters += block.text().length();
+            if (characters > MAX_FIELD_CHARS || isResponseBoundary(block.text(), rules)) {
+                return i;
+            }
+            if (anchorLevel > 0 && block.headingLevel() > 0 && block.headingLevel() <= anchorLevel) {
+                return i;
+            }
+        }
+        return limit;
+    }
+
+    private Optional<ClassificationSection> findBestClassificationSection(
+            ResponseBridge bridge,
+            LevelDefinition definition,
+            List<ClassificationSection> sections) {
+        return sections.stream()
+                .map(section -> Map.entry(section, classificationMatchScore(bridge.subject(), definition, section)))
+                .filter(entry -> entry.getValue() > 0)
+                .max(Map.Entry.comparingByValue())
+                .map(Map.Entry::getKey);
+    }
+
+    private int classificationMatchScore(
+            String subject, LevelDefinition definition, ClassificationSection section) {
+        String normalizedSubject = normalize(subject).replaceAll("[、,，/和及与或]", "");
+        String label = normalize(section.label());
+        if (label.contains(normalizedSubject)) {
+            // “重大地质灾害”是“特别重大地质灾害”的子串，必须排除该假精确命中。
+            if (!normalizedSubject.contains("特别重大")
+                    && normalizedSubject.contains("重大")
+                    && label.contains("特别重大")) {
+                return -1;
+            }
+            return 200 + normalizedSubject.length();
+        }
+        String domain = normalizedSubject
+                .replace("特别重大", "")
+                .replace("重大", "")
+                .replace("较大", "")
+                .replace("一般", "")
+                .replaceAll("[、,，/和及与或]", "");
+        if (subjectMentionsSeverity(subject, definition)
+                && containsSeverity(label, definition)
+                && (domain.length() < 2 || label.contains(domain))) {
+            return 100 + domain.length();
+        }
+        return -1;
+    }
+
+    private boolean subjectMentionsSeverity(String text, LevelDefinition definition) {
+        String value = normalize(text);
+        return switch (definition.key()) {
+            case "level_1" -> value.contains("特别重大");
+            case "level_2" -> value.replace("特别重大", "").contains("重大");
+            case "level_3" -> value.contains("较大");
+            case "level_4" -> value.contains("一般");
+            default -> false;
+        };
+    }
+
+    /** 分级章节中的裸等级标记只承担跨章节关联，不要求标题同时包含“响应”。 */
+    private int classificationLevelOrdinal(String text) {
+        Set<Integer> ordinals = new LinkedHashSet<>();
+        Matcher matcher = CLASSIFICATION_LEVEL_PATTERN.matcher(normalize(text));
+        while (matcher.find()) {
+            int ordinal = levelTokenOrdinal(matcher.group(1));
+            if (ordinal > 0) {
+                ordinals.add(ordinal);
+            }
+        }
+        if (ordinals.size() > 1) {
+            return -1;
+        }
+        return ordinals.stream().findFirst().orElse(0);
+    }
+
+    private boolean isClassificationLevelAnchor(DocumentBlock block) {
+        if (block.heading()) {
+            return true;
+        }
+        String value = normalize(block.text());
+        String token = "(?:IV|III|II|(?<!I)I(?!I)|[一二三四1-4])级";
+        return value.matches(".*" + token + "[。.]?$")
+                || value.matches("^" + token
+                + "(?:特别重大|重大|较大|一般|特大型|大型|中型|小型|事件|事故|灾害|险情|灾情).{0,40}$");
+    }
+
+    private boolean isEmergencyClassificationScope(String text, SegmentRules rules) {
+        String value = normalize(text);
+        if (value.contains("预警") || value.contains("响应")) {
+            return false;
+        }
+        List<String> markers = new ArrayList<>(List.of(
+                "事件分级", "事故分级", "灾害分级", "险情与灾情分级", "灾情分级", "分级标准", "事件等级"));
+        rules.markerAliases().getOrDefault("activation_condition", List.of()).stream()
+                .filter(alias -> alias.contains("分级") || alias.contains("等级"))
+                .forEach(markers::add);
+        return markers.stream().map(this::normalize).anyMatch(value::contains)
+                || value.matches(".*(?:事件|事故|灾害|险情|灾情).{0,20}(?:分级|等级).*");
     }
 
     private int countSeverityLevels(String text) {
@@ -398,6 +742,7 @@ public class PlanSegmentService {
     private int findClassificationEnd(
             int start, List<DocumentBlock> blocks, List<LevelDefinition> definitions, SegmentRules rules) {
         int anchorLevel = blocks.get(start).headingLevel();
+        int scopeLevel = classificationScopeHeadingLevel(start, blocks, rules);
         int limit = Math.min(blocks.size(), start + 20);
         int characters = 0;
         for (int i = start + 1; i < limit; i++) {
@@ -406,21 +751,44 @@ public class PlanSegmentService {
             if (characters > MAX_FIELD_CHARS || isResponseBoundary(block.text(), rules)) {
                 return i;
             }
+            if (classificationLevelOrdinal(block.text()) != 0 && isClassificationLevelAnchor(block)) {
+                return i;
+            }
             if (definitions.stream().anyMatch(definition -> containsSeverity(block.text(), definition))
                     && (block.heading() || block.text().length() <= 40)) {
                 return i;
             }
-            if (anchorLevel > 0 && block.headingLevel() > 0 && block.headingLevel() <= anchorLevel) {
+            int boundaryLevel = scopeLevel > 0 ? scopeLevel : anchorLevel;
+            if (boundaryLevel > 0 && block.headingLevel() > 0 && block.headingLevel() <= boundaryLevel) {
                 return i;
             }
         }
         return limit;
     }
 
+    private int classificationScopeHeadingLevel(
+            int start, List<DocumentBlock> blocks, SegmentRules rules) {
+        for (int i = start; i >= Math.max(0, start - MAX_CLASSIFICATION_CONTEXT_BLOCKS); i--) {
+            DocumentBlock block = blocks.get(i);
+            if (isEmergencyClassificationScope(block.text(), rules)) {
+                return block.headingLevel();
+            }
+        }
+        return 0;
+    }
+
     private boolean isPrimaryLevelMention(
             DocumentBlock block, LevelDefinition current, List<LevelDefinition> definitions) {
         if (isResponseLifecycleReference(block.text())) {
             return false;
+        }
+        // “响应分为四级、分别由谁实施”是多级概述，不能打开任一等级窗口，
+        // 否则其后的单级条件会被整个窗口吸收到所有等级。
+        if (isGenericResponseLevelOverview(block.text())) {
+            return false;
+        }
+        if (isResponseBridgeStatement(block.text(), current, definitions)) {
+            return true;
         }
         // 部分预案不用标题样式，而是以“启动一级应急响应：”作为措施列表入口。
         // 该短句本身不是条件正文，但必须作为级别窗口锚点，否则后续措施会整体漏掉。
@@ -488,7 +856,18 @@ public class PlanSegmentService {
         return matchingAlias(text, definition.aliases()) != null
                 || matchesCompressedLevelMention(text, definition)
                 || matchesGenericLevelMention(text, definition)
-                || matchesGroupedLevelMention(text, definition);
+                || matchesGroupedLevelMention(text, definition)
+                || matchesInverseResponseLevel(text, definition);
+    }
+
+    private boolean matchesInverseResponseLevel(String text, LevelDefinition definition) {
+        Matcher matcher = INVERSE_RESPONSE_BRIDGE_PATTERN.matcher(normalize(text));
+        while (matcher.find()) {
+            if (levelTokenOrdinal(matcher.group(2)) == levelOrdinal(definition)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean matchesGenericLevelMention(String text, LevelDefinition definition) {
@@ -583,19 +962,48 @@ public class PlanSegmentService {
             boolean levelHeading = matchesAnyLevel(block.text(), definitions)
                     && !looksLikeCondition(block.text())
                     && !isConditionLevelContinuation(i, blocks)
-                    && (block.heading() || block.table() || block.text().length() <= 18 || startsWithNumber(block.text()));
-            if (isResponseBoundary(block.text(), rules) || levelHeading) {
+                    && (block.heading() || block.table() || isStandaloneLevelHeading(block.text(), definitions));
+            if (isResponseBoundary(block.text(), rules)
+                    || isResponseLifecycleReference(block.text())
+                    || levelHeading) {
                 return i;
             }
-            if (anchorLevel > 0 && block.headingLevel() > 0 && block.headingLevel() <= anchorLevel && i > start + 1) {
+            if (anchorLevel > 0 && block.headingLevel() > 0 && block.headingLevel() <= anchorLevel
+                    && i > start + 1 && !isNumberedBodyItem(block.text())) {
                 return i;
             }
         }
         return limit;
     }
 
+    private boolean isNumberedBodyItem(String text) {
+        String value = text.trim();
+        boolean listPrefix = value.matches("^(?:[（(]?\\d{1,2}[）)、]|\\d{1,2}[.．]\\s+).+");
+        return listPrefix && (looksLikeCondition(value)
+                || looksLikeResponseAction(value)
+                || value.matches(".*[。；;]$"));
+    }
+
+    private boolean isStandaloneLevelHeading(String text, List<LevelDefinition> definitions) {
+        String value = stripSectionNumber(normalize(text));
+        for (LevelDefinition definition : definitions) {
+            for (String alias : definition.aliases()) {
+                String normalizedAlias = normalize(alias);
+                if (value.equals(normalizedAlias)
+                        || value.equals("启动" + normalizedAlias)
+                        || value.equals("实施" + normalizedAlias)
+                        || value.equals("进入" + normalizedAlias)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private int enclosingHeadingLevel(int start, List<DocumentBlock> blocks) {
-        for (int i = start - 1; i >= Math.max(0, start - 12); i--) {
+        // 无样式的“启动四级响应”常位于同一措施章节的末尾，前面三级内容较长；
+        // 回溯过短会丢失父章节层级，使最后一级吞入后续公共措施章节。
+        for (int i = start - 1; i >= Math.max(0, start - MAX_LEVEL_WINDOW_BLOCKS); i--) {
             if (blocks.get(i).headingLevel() > 0) {
                 return blocks.get(i).headingLevel();
             }
@@ -688,11 +1096,38 @@ public class PlanSegmentService {
         ContentDecision decision = contextDecision(category, start, blocks, rules);
         ContentKind kind = decision.kind();
         boolean structuredRole = decision.structured();
+        boolean inverseBridgeWindow = "EMERGENCY".equals(category)
+                && INVERSE_RESPONSE_BRIDGE_PATTERN.matcher(normalize(blocks.get(start).text())).find();
         for (int i = start; i < end; i++) {
             DocumentBlock block = blocks.get(i);
             String text = block.text().trim();
             if (i == start && (block.heading()
                     || text.length() <= 30 && !text.matches(".*[。；;].*"))) {
+                continue;
+            }
+            if ("EMERGENCY".equals(category) && isNestedDisasterLossHeading(block, text, start, blocks)) {
+                kind = ContentKind.CONDITION;
+                structuredRole = true;
+                continue;
+            }
+            if ("EMERGENCY".equals(category) && isNestedStartupProcedureHeading(block, text, start, blocks)) {
+                // 启动程序说明如何审批进入响应，只在没有正式措施章节时作为语义兜底。
+                kind = ContentKind.MEASURE;
+                structuredRole = false;
+                continue;
+            }
+            if ("EMERGENCY".equals(category) && isNestedEmergencyMeasureHeading(block, text, start, blocks)) {
+                // “6.1.3 应急响应”位于具体等级之下时是措施字段，不是新的响应总章节。
+                kind = ContentKind.MEASURE;
+                structuredRole = true;
+                continue;
+            }
+            if ("WARNING".equals(category) && isWarningConditionIntroduction(text)) {
+                // “符合下列条件之一时可发布蓝色预警。根据气象部门……”中的后半句
+                // 仍是条件来源说明，不是响应措施；后续阈值应持续归入条件。
+                structuredConditions.add(block);
+                kind = ContentKind.CONDITION;
+                structuredRole = true;
                 continue;
             }
             InlineContentParts warningParts = "WARNING".equals(category)
@@ -701,6 +1136,17 @@ public class PlanSegmentService {
             if (warningParts != null) {
                 structuredConditions.add(warningParts.condition());
                 structuredMeasures.add(warningParts.measure());
+                kind = ContentKind.MEASURE;
+                structuredRole = true;
+                continue;
+            }
+            InlineContentParts eventActionParts = inverseBridgeWindow
+                    ? splitEventTriggerAndAction(block)
+                    : null;
+            if (eventActionParts != null) {
+                // 触发短语由桥接关系作为低优先级条件保存；这里仅保留逗号后的行动，
+                // 防止“发生某灾害时”覆盖前文更具体的分级阈值。
+                structuredMeasures.add(eventActionParts.measure());
                 kind = ContentKind.MEASURE;
                 structuredRole = true;
                 continue;
@@ -728,7 +1174,8 @@ public class PlanSegmentService {
                 continue;
             }
             if (isStructuralMarker(
-                    block, text, rules, "activation_condition", List.of("启动条件", "响应条件", "发布条件"))) {
+                    block, text, rules, "activation_condition",
+                    List.of("启动条件", "响应条件", "发布条件", "灾害损失情况"))) {
                 kind = ContentKind.CONDITION;
                 structuredRole = true;
             }
@@ -766,12 +1213,56 @@ public class PlanSegmentService {
                 pages(semanticMeasures));
     }
 
+    private boolean isNestedDisasterLossHeading(
+            DocumentBlock block, String text, int levelStart, List<DocumentBlock> blocks) {
+        return isNestedFieldHeading(block, text, levelStart, blocks)
+                && normalize(stripSectionNumber(text)).equals("灾害损失情况");
+    }
+
+    private boolean isNestedStartupProcedureHeading(
+            DocumentBlock block, String text, int levelStart, List<DocumentBlock> blocks) {
+        String value = normalize(stripSectionNumber(text));
+        return isNestedFieldHeading(block, text, levelStart, blocks)
+                && value.matches("(?:响应)?启动(?:程序|流程)");
+    }
+
+    private boolean isNestedEmergencyMeasureHeading(
+            DocumentBlock block, String text, int levelStart, List<DocumentBlock> blocks) {
+        String value = normalize(stripSectionNumber(text));
+        return isNestedFieldHeading(block, text, levelStart, blocks)
+                && (value.equals("应急响应") || value.equals("响应") || value.equals("响应措施"));
+    }
+
+    private boolean isNestedFieldHeading(
+            DocumentBlock block, String text, int levelStart, List<DocumentBlock> blocks) {
+        if (!block.heading() && !startsWithNumber(text)) {
+            return false;
+        }
+        int parentLevel = blocks.get(levelStart).headingLevel();
+        return parentLevel <= 0 || block.headingLevel() <= 0 || block.headingLevel() > parentLevel;
+    }
+
+    private boolean isWarningConditionIntroduction(String text) {
+        String value = normalize(text);
+        return value.matches("^(?:当)?符合(?:下列)?(?:条件|情况|情形)(?:之一)?时?可?发布.{0,20}预警.*");
+    }
+
     /** 将“当发布蓝色、黄色预警信息后，……”拆成触发条件和对应措施。 */
     private InlineContentParts splitWarningTriggerAndMeasure(DocumentBlock block) {
         Matcher matcher = Pattern.compile(
                         "^((?:当)?发布.{1,80}?预警(?:信息)?(?:后|时))[，,：:](.+)$")
                 .matcher(block.text().trim());
         if (!matcher.matches() || !StringUtils.hasText(matcher.group(2))) {
+            return null;
+        }
+        return new InlineContentParts(
+                copyBlockWithText(block, matcher.group(1).trim()),
+                copyBlockWithText(block, matcher.group(2).trim()));
+    }
+
+    private InlineContentParts splitEventTriggerAndAction(DocumentBlock block) {
+        Matcher matcher = EVENT_TRIGGER_ACTION_PATTERN.matcher(block.text().trim());
+        if (!matcher.matches() || !looksLikeResponseAction(matcher.group(2))) {
             return null;
         }
         return new InlineContentParts(
@@ -1001,7 +1492,7 @@ public class PlanSegmentService {
             String text = marker.text();
             if (!isCategoryCompatible(category, index, blocks)
                     || matchesAnyLevel(text, definitions)
-                    || !isCommonMeasureHeading(marker, text)) {
+                    || !isCommonMeasureHeading(category, marker, text)) {
                 continue;
             }
             int headingLevel = marker.headingLevel() > 0 ? marker.headingLevel() : 3;
@@ -1032,21 +1523,38 @@ public class PlanSegmentService {
         }
     }
 
-    private boolean isCommonMeasureHeading(DocumentBlock block, String text) {
+    private boolean isCommonMeasureHeading(String category, DocumentBlock block, String text) {
         if (!block.heading() && !isStandaloneMarker(text)) {
             return false;
         }
         String normalized = normalize(text);
-        boolean commonTitle = normalized.contains("共同") || normalized.contains("共性")
-                || normalized.contains("一般程序") || normalized.contains("基本程序")
-                || normalized.contains("响应程序") || normalized.contains("应急处置");
+        if ("WARNING".equals(category)
+                && normalized.contains("预警")
+                && normalized.contains("响应")
+                && normalized.contains("发布")) {
+            return true;
+        }
+        if ("EMERGENCY".equals(category)
+                && normalized.contains("预警")
+                && !normalized.contains("应急响应")) {
+            return false;
+        }
+        String title = normalize(stripSectionNumber(text));
+        boolean titleLike = title.length() <= 30 && !title.matches(".*[，,。！？!?].*");
+        boolean commonTitle = titleLike && (title.matches(".*(?:共同|共性)(?:响应|应急|处置)?(?:措施|行动|程序)$")
+                || title.contains("一般程序") || title.contains("基本程序")
+                || title.contains("响应程序") || title.contains("应急处置"));
+        boolean topLevelCommonMeasures = titleLike
+                && block.headingLevel() > 0 && block.headingLevel() <= 2
+                && title.matches(".*(?:响应|处置)措施$");
         return commonTitle
+                || topLevelCommonMeasures
                 || block.headingLevel() > 0 && block.headingLevel() <= 2
                 && (normalized.contains("响应行动") || normalized.contains("反应行动"));
     }
 
     private boolean looksLikeResponseAction(String text) {
-        return text.matches("(?s).*(组织|开展|调度|派出|加强|负责|协调|处置|救援|保障|报告|启动|实施).*" );
+        return text.matches("(?s).*(组织|开展|调度|派出|加强|负责|协调|处置|救援|保障|报告|启动|实施|发布|通知|通报).*" );
     }
 
     /**
@@ -1088,7 +1596,7 @@ public class PlanSegmentService {
             return level.effectiveMeasures();
         }
         if (!visiting.add(level.definition().key())) {
-            return level.directMeasures();
+            return level.baseEffectiveMeasures();
         }
         List<String> paragraphs = new ArrayList<>();
         for (String sourceKey : level.inheritedFrom()) {
@@ -1098,6 +1606,7 @@ public class PlanSegmentService {
             }
         }
         addParagraphs(paragraphs, level.directMeasures());
+        addParagraphs(paragraphs, level.commonMeasures());
         visiting.remove(level.definition().key());
         String effective = paragraphs.isEmpty() ? null : String.join("\n", paragraphs);
         level.setEffectiveMeasures(effective);
@@ -1546,6 +2055,16 @@ public class PlanSegmentService {
             String key, String level, String colorKey, String colorName, List<String> aliases) {
     }
 
+    private record ResponseBridge(
+            String subject,
+            Set<String> targetKeys,
+            DocumentBlock block,
+            DocumentBlock triggerBlock) {
+    }
+
+    private record ClassificationSection(String label, List<DocumentBlock> blocks) {
+    }
+
     private record CandidateParts(
             String structuredConditions,
             String structuredMeasures,
@@ -1576,15 +2095,23 @@ public class PlanSegmentService {
         private final List<String> structuredConditions = new ArrayList<>();
         private final List<String> explicitConditions = new ArrayList<>();
         private final List<String> semanticConditions = new ArrayList<>();
+        private final List<String> bridgedClassificationConditions = new ArrayList<>();
+        private final List<String> triggerConditions = new ArrayList<>();
+        private final List<String> bridgeConditions = new ArrayList<>();
         private final List<String> classificationConditions = new ArrayList<>();
         private final List<String> structuredMeasures = new ArrayList<>();
         private final List<String> semanticMeasures = new ArrayList<>();
+        private final List<String> commonMeasures = new ArrayList<>();
         private final Set<Integer> structuredConditionPages = new LinkedHashSet<>();
         private final Set<Integer> explicitConditionPages = new LinkedHashSet<>();
         private final Set<Integer> semanticConditionPages = new LinkedHashSet<>();
+        private final Set<Integer> bridgedClassificationConditionPages = new LinkedHashSet<>();
+        private final Set<Integer> triggerConditionPages = new LinkedHashSet<>();
+        private final Set<Integer> bridgeConditionPages = new LinkedHashSet<>();
         private final Set<Integer> classificationConditionPages = new LinkedHashSet<>();
         private final Set<Integer> structuredMeasurePages = new LinkedHashSet<>();
         private final Set<Integer> semanticMeasurePages = new LinkedHashSet<>();
+        private final Set<Integer> commonMeasurePages = new LinkedHashSet<>();
         private final List<String> evidence = new ArrayList<>();
         private final List<String> inheritedFrom = new ArrayList<>();
         private boolean levelEvidenceDetected;
@@ -1634,6 +2161,38 @@ public class PlanSegmentService {
             }
         }
 
+        private void addBridgeEvidence(DocumentBlock block) {
+            levelEvidenceDetected = true;
+            if (title == null) {
+                title = definition.level();
+            }
+            if (evidence.size() < 5 && !evidence.contains(block.text())) {
+                evidence.add(block.text());
+            }
+        }
+
+        private void addBridgedClassificationConditionBlocks(List<DocumentBlock> blocks) {
+            if (blocks.isEmpty()) {
+                return;
+            }
+            addParagraphs(bridgedClassificationConditions, joinText(blocks));
+            bridgedClassificationConditionPages.addAll(pages(blocks));
+        }
+
+        private void addTriggerCondition(DocumentBlock block) {
+            addParagraphs(triggerConditions, block.text());
+            if (block.page() > 0) {
+                triggerConditionPages.add(block.page());
+            }
+        }
+
+        private void addBridgeCondition(DocumentBlock block) {
+            addParagraphs(bridgeConditions, block.text());
+            if (block.page() > 0) {
+                bridgeConditionPages.add(block.page());
+            }
+        }
+
         private void addClassificationConditionBlocks(List<DocumentBlock> blocks) {
             // 事件/灾害分级只能补充已确认存在的响应等级，不能凭“一般灾害”等级硬造四级响应。
             if (!levelEvidenceDetected || blocks.isEmpty()) {
@@ -1651,9 +2210,9 @@ public class PlanSegmentService {
         }
 
         private void addSharedMeasures(List<DocumentBlock> blocks, String marker) {
-            // 公共措施标题是明确证据，但将其分配给每个等级仍属于语义推断。
-            addParagraphs(semanticMeasures, joinText(blocks));
-            semanticMeasurePages.addAll(pages(blocks));
+            // 公共措施只参与有效措施，不能覆盖或冒充本级直接措施。
+            addParagraphs(commonMeasures, joinText(blocks));
+            commonMeasurePages.addAll(pages(blocks));
             if (evidence.size() < 5 && !evidence.contains(marker)) {
                 evidence.add(marker);
             }
@@ -1672,6 +2231,17 @@ public class PlanSegmentService {
             return selected.isEmpty() ? null : String.join("\n", selected);
         }
 
+        private String commonMeasures() {
+            return commonMeasures.isEmpty() ? null : String.join("\n", commonMeasures);
+        }
+
+        private String baseEffectiveMeasures() {
+            List<String> measures = new ArrayList<>();
+            addParagraphs(measures, directMeasures());
+            addParagraphs(measures, commonMeasures());
+            return measures.isEmpty() ? null : String.join("\n", measures);
+        }
+
         private List<String> selectedConditions() {
             List<String> highConfidence = new ArrayList<>();
             structuredConditions.stream()
@@ -1687,6 +2257,15 @@ public class PlanSegmentService {
                     .forEach(condition -> addParagraphs(semantic, condition));
             if (!semantic.isEmpty()) {
                 return semantic;
+            }
+            if (!bridgedClassificationConditions.isEmpty()) {
+                return bridgedClassificationConditions;
+            }
+            if (!triggerConditions.isEmpty()) {
+                return triggerConditions;
+            }
+            if (!bridgeConditions.isEmpty()) {
+                return bridgeConditions;
             }
             if (!structuredConditions.isEmpty()) {
                 return structuredConditions;
@@ -1710,6 +2289,23 @@ public class PlanSegmentService {
                 pages.addAll(explicitConditionPages);
                 return pages;
             }
+            boolean semanticHighConfidence = semanticConditions.stream()
+                    .anyMatch(condition -> !isGenericResponseLevelOverview(condition));
+            if (semanticHighConfidence) {
+                return semanticConditionPages;
+            }
+            if (!bridgedClassificationConditions.isEmpty()) {
+                return bridgedClassificationConditionPages;
+            }
+            if (!triggerConditions.isEmpty()) {
+                return triggerConditionPages;
+            }
+            if (!bridgeConditions.isEmpty()) {
+                return bridgeConditionPages;
+            }
+            if (!structuredConditions.isEmpty()) {
+                return structuredConditionPages;
+            }
             if (!semanticConditions.isEmpty()) {
                 return semanticConditionPages;
             }
@@ -1717,7 +2313,10 @@ public class PlanSegmentService {
         }
 
         private Set<Integer> selectedMeasurePages() {
-            return structuredMeasures.isEmpty() ? semanticMeasurePages : structuredMeasurePages;
+            Set<Integer> pages = new LinkedHashSet<>(
+                    structuredMeasures.isEmpty() ? semanticMeasurePages : structuredMeasurePages);
+            pages.addAll(commonMeasurePages);
+            return pages;
         }
 
         private String effectiveMeasures() {

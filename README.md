@@ -149,7 +149,7 @@ plan:
 - `SPRING_DATASOURCE_USERNAME`
 - `SPRING_DATASOURCE_PASSWORD`
 
-旧环境仍可用 `src/main/resources/db/postgresql/migration/upgrade_plan_digitize_v2.sql` 做一次性升级；完成后应由 Flyway 接管后续版本。V2 迁移增加模板/规则修订和人工复核审计表，V4 新增预案目录表，V5 增加准确率样本表，V6 增加罗马数字响应别名，V7 增加多格式预案兼容规则。若历史库曾以 `roman_emergency_response_aliases` 作为 V5 执行，先运行 `db/postgresql/repair_v5_roman_history.sql`，再执行 Flyway repair 和后续迁移。规则默认缓存一分钟，每份文档只读取一次不可变规则快照，结果中的 `ruleVersion` 用于复现。
+旧环境仍可用 `src/main/resources/db/postgresql/migration/upgrade_plan_digitize_v2.sql` 做一次性升级；完成后应由 Flyway 接管后续版本。V2 迁移增加模板/规则修订和人工复核审计表，V4 新增预案目录表，V5 增加准确率样本表，V6 增加罗马数字响应别名，V7 增加多格式预案兼容规则，V8 增加跨章节险情/灾情分级条件别名，V9 增加等级子章节“灾害损失情况”启动条件别名。若历史库曾以 `roman_emergency_response_aliases` 作为 V5 执行，先运行 `db/postgresql/repair_v5_roman_history.sql`，再执行 Flyway repair 和后续迁移。规则默认缓存一分钟，每份文档只读取一次不可变规则快照，结果中的 `ruleVersion` 用于复现。
 
 URL 下载默认拒绝回环、私网、链路本地、组播、CGNAT 地址和非法端口，并会对每次重定向重新验证。生产环境必须设置 `PLAN_DOCUMENT_ALLOWED_HOSTS` 为逗号分隔的业务域名白名单；不要把服务端口直接暴露到网关之外。
 
